@@ -136,7 +136,8 @@ ssh -i "$SSH_KEY" "$SERVER" bash <<REMOTE
 set -euo pipefail
 cd $REMOTE_DIR
 
-# Load env vars for the Python script
+# Load env vars for the Python script (strip Windows CRLF line endings first)
+sed -i 's/\r$//' .env
 set -a
 source .env
 set +a
