@@ -88,14 +88,25 @@ pub async fn run_listener(
         println!("🟢 WS Connected. Subscribing to {} elite wallets...", wallets.len());
         let (mut write, mut read) = ws_stream.split();
 
-        // Subscribe to our tracked wallets
-        let subscribe_msg = json!({
-            "method": "subscribeAccountTrade",
-            "keys": wallets
-        });
+        // Subscribe to our tracked wallets in chunks of 1000 to avoid WS message size limits
+        let mut sub_failed = false;
+        for chunk in wallets.chunks(1000) {
+            let subscribe_msg = json!({
+                "method": "subscribeAccountTrade",
+                "keys": chunk
+            });
 
-        if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
-            eprintln!("Failed to send subscribe message: {}", e);
+            if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
+                eprintln!("Failed to send subscribe message chunk: {}", e);
+                sub_failed = true;
+                break;
+            }
+            // Small delay to prevent rate-limiting the websocket server during setup
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        if sub_failed {
+            tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
 
