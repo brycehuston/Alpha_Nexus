@@ -39,6 +39,10 @@ use std::sync::Arc;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Initialize Alpha Nexus Daemon...");
 
+    // Attempt to load .env from the parent directory for local development/testing.
+    // In production (deploy.sh), the env vars are sourced by the bash script or systemd.
+    let _ = dotenvy::from_path("../.env");
+
     // 1. Load configuration
     let config = config::AppConfig::load_from_env()?;
     
