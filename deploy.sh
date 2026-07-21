@@ -82,7 +82,7 @@ python3 --version
 pip3 --version || sudo apt-get install -y -q python3-pip
 
 echo "  Checking dune-client and redis Python packages..."
-pip3 show dune-client redis > /dev/null 2>&1 || pip3 install --quiet dune-client redis
+pip3 show dune-client redis > /dev/null 2>&1 || pip3 install --quiet --break-system-packages dune-client redis
 echo "  ✅ Python deps present."
 REMOTE
 
