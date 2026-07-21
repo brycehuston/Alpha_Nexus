@@ -69,11 +69,11 @@ echo "▶ [3/6] Checking server dependencies..."
 ssh -i "$SSH_KEY" "$SERVER" bash <<'REMOTE'
 set -euo pipefail
 echo "  Checking Redis..."
-if ! systemctl is-active --quiet redis; then
+if ! systemctl is-active --quiet redis-server; then
     echo "  Redis not running — installing and starting..."
     sudo apt-get update -q && sudo apt-get install -y -q redis-server
-    sudo systemctl enable redis
-    sudo systemctl start redis
+    sudo systemctl enable redis-server
+    sudo systemctl start redis-server
 fi
 redis-cli ping | grep -q PONG && echo "  ✅ Redis is up."
 
