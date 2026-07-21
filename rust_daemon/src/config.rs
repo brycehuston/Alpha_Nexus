@@ -21,6 +21,9 @@ impl AppConfig {
         // FALLBACK_PRIORITY_FEE with no warning. A misconfigured deploy would
         // produce real trades with systematically underpriced sell fees.
         // -----------------------------------------------------------------------
+        let dry_run_env = env::var("DRY_RUN").unwrap_or_else(|_| "false".to_string());
+        let dry_run = dry_run_env.to_lowercase() == "true" || dry_run_env == "1";
+
         let rpc_url = env::var("RPC_URL").map_err(|_| {
             crate::error::BotError::ConfigError(
                 "RPC_URL environment variable is REQUIRED. \
@@ -64,17 +67,22 @@ impl AppConfig {
         let bot_keypair = match keypair_result {
             Ok(kp) => kp,
             Err(_) => {
-                return Err(crate::error::BotError::ConfigError(
-                    "BOT_PRIVATE_KEY is not valid base58. \
-                     Verify the key was not truncated or corrupted."
-                        .to_string(),
-                ));
+                if dry_run {
+                    println!("⚠️  BOT_PRIVATE_KEY is invalid, but DRY_RUN=true. Generating temporary dummy wallet.");
+                    Keypair::new()
+                } else {
+                    return Err(crate::error::BotError::ConfigError(
+                        "BOT_PRIVATE_KEY is not valid base58. \
+                         Verify the key was not truncated or corrupted."
+                            .to_string(),
+                    ));
+                }
             }
         };
 
         // Sanity check: the zero pubkey means keypair construction silently failed.
         let pubkey = bot_keypair.pubkey();
-        if pubkey == solana_sdk::pubkey::Pubkey::default() {
+        if pubkey == solana_sdk::pubkey::Pubkey::default() && !dry_run {
             return Err(crate::error::BotError::ConfigError(
                 "BOT_PRIVATE_KEY produced a zero/default pubkey — \
                  the key is invalid. Check for truncation or encoding errors."
@@ -95,9 +103,6 @@ impl AppConfig {
         if telegram_bot_token.is_none() || telegram_chat_id.is_none() {
             println!("⚠️  TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — alerts disabled.");
         }
-
-        let dry_run_env = env::var("DRY_RUN").unwrap_or_else(|_| "false".to_string());
-        let dry_run = dry_run_env.to_lowercase() == "true" || dry_run_env == "1";
 
         if dry_run {
             println!("🧪 DRY RUN MODE ENABLED: Bot will simulate trades without risking real capital.");

@@ -67,8 +67,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let elite_wallets = match redis_client::fetch_elite_wallets().await {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("Failed to load wallets from Redis: {}", e);
-            return Ok(());
+            if config.dry_run {
+                println!("⚠️  Failed to load wallets from Redis: {}. (Dry Run mode active, using dummy wallet to bypass)", e);
+                vec!["11111111111111111111111111111111".to_string()]
+            } else {
+                eprintln!("Failed to load wallets from Redis: {}", e);
+                return Ok(());
+            }
         }
     };
 
