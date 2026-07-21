@@ -16,8 +16,9 @@ def update_redis_whitelist():
 
     print(f"Fetching smart wallets from Dune query {dune_query_id}...")
     dune = DuneClient(api_key=dune_api_key)
-    query = QueryBase(name="Smart Herd Sync", query_id=dune_query_id)
-    results = dune.run_query(query)
+    # We fetch the latest results instead of forcing an execution because free tier
+    # or non-owner API keys throw a 403 Forbidden on the /execute endpoint.
+    results = dune.get_latest_query_results(dune_query_id)
     wallets = [row['smart_wallet_address'] for row in results.get_rows()]
 
     if not wallets:
