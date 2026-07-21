@@ -115,9 +115,12 @@ pub async fn monitor_and_sell(
     bot_keypair: Arc<Keypair>,
     bot_state: Arc<BotState>,
     rpc_url: String,
+    telegram_bot_token: Option<String>,
+    telegram_chat_id: Option<String>,
 ) {
     match timeout(WATCHER_MAX_LIFETIME, monitor_and_sell_inner(
-        target_mint.clone(), rpc_client, http_client, bot_keypair, bot_state, rpc_url
+        target_mint.clone(), rpc_client, http_client, bot_keypair, bot_state, rpc_url,
+        telegram_bot_token, telegram_chat_id,
     )).await {
         Ok(()) => {}
         Err(_elapsed) => {
@@ -141,6 +144,8 @@ async fn monitor_and_sell_inner(
     bot_keypair: Arc<Keypair>,
     bot_state: Arc<BotState>,
     rpc_url: String,
+    telegram_bot_token: Option<String>,
+    telegram_chat_id: Option<String>,
 ) {
     let wallet_pubkey = bot_keypair.pubkey();
 
@@ -457,6 +462,19 @@ async fn monitor_and_sell_inner(
                 http_client.clone(), bot_keypair.clone(), &rpc_url
             ).await {
                 exit_value_usd = current_value_usd;
+                // Fire-and-forget sell alert — never block the exit path on HTTP.
+                if let (Some(token), Some(chat)) = (telegram_bot_token.clone(), telegram_chat_id.clone()) {
+                    let pnl = exit_value_usd - entry_cost_usd;
+                    let pnl_pct = (exit_value_usd / entry_cost_usd - 1.0) * 100.0;
+                    let http_clone = http_client.clone();
+                    let mint_clone = target_mint.clone();
+                    tokio::spawn(async move {
+                        crate::telegram::send_bot_sell_alert(
+                            &http_clone, &token, &chat, &mint_clone,
+                            pnl, pnl_pct, "PANIC DUMP", exit_value_usd,
+                        ).await;
+                    });
+                }
                 break;
             }
         }
@@ -481,6 +499,20 @@ async fn monitor_and_sell_inner(
                 http_client.clone(), bot_keypair.clone(), &rpc_url
             ).await {
                 exit_value_usd = current_value_usd;
+                // Fire-and-forget sell alert — never block the exit path on HTTP.
+                if let (Some(token), Some(chat)) = (telegram_bot_token.clone(), telegram_chat_id.clone()) {
+                    let pnl = exit_value_usd - entry_cost_usd;
+                    let pnl_pct = (exit_value_usd / entry_cost_usd - 1.0) * 100.0;
+                    let http_clone = http_client.clone();
+                    let mint_clone = target_mint.clone();
+                    let reason = exit_reason.to_string();
+                    tokio::spawn(async move {
+                        crate::telegram::send_bot_sell_alert(
+                            &http_clone, &token, &chat, &mint_clone,
+                            pnl, pnl_pct, &reason, exit_value_usd,
+                        ).await;
+                    });
+                }
                 break;
             }
         }

@@ -198,6 +198,31 @@ pub async fn run_listener(
                                                     continue 'connection;
                                                 }
 
+                                                // ---- TOKEN AGE FILTER -----
+                                                // Skip tokens listed less than 60 seconds ago.
+                                                // New tokens are maximum rug risk — the deployer
+                                                // can pull liquidity before any watcher exits.
+                                                // The DexScreener call has a 1.5s timeout (same as
+                                                // the Telegram alert path) so latency cost is minimal.
+                                                let meta = crate::telegram::fetch_token_metadata(
+                                                    &http_client, &event.mint
+                                                ).await;
+                                                if meta.created_at_ms > 0 {
+                                                    let now_ms = std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .unwrap_or_default()
+                                                        .as_millis() as u64;
+                                                    let age_ms = now_ms.saturating_sub(meta.created_at_ms);
+                                                    if age_ms < 60_000 {
+                                                        println!(
+                                                            "⚠️  Token age filter: {} is only {}s old. \
+                                                             Skipping to avoid sub-60s rug.",
+                                                            event.mint, age_ms / 1000
+                                                        );
+                                                        continue 'connection;
+                                                    }
+                                                }
+
                                                 if bot_state.is_circuit_breaker_active() { continue 'connection; }
 
                                                 let position_permit = match bot_state.try_acquire_position() {
@@ -231,12 +256,15 @@ pub async fn run_listener(
                                                 let keypair_clone  = bot_keypair.clone();
                                                 let state_clone    = bot_state.clone();
                                                 let rpc_url_clone  = rpc_url.clone();
+                                                let tg_token       = telegram_bot_token.clone();
+                                                let tg_chat        = telegram_chat_id.clone();
 
                                                 tokio::spawn(async move {
                                                     execute_pump_buy(
                                                         target_mint, rpc_clone, http_clone,
                                                         keypair_clone, state_clone, rpc_url_clone,
                                                         position_permit,
+                                                        tg_token, tg_chat,
                                                     ).await;
                                                 });
                                             }

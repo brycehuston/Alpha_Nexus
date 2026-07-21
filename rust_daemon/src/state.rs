@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -44,8 +44,9 @@ const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
 
 pub struct BotState {
     /// Tracks mints we are currently trading or have already traded.
-    /// Prevents duplicate entries on the same token.
-    pub traded_mints: RwLock<HashSet<String>>,
+    /// Maps mint address -> time of first entry. Entries expire after 4 hours,
+    /// allowing the bot to re-enter the same token on a second pump.
+    pub traded_mints: RwLock<HashMap<String, Instant>>,
 
     /// Tracks consecutive stop-losses to trigger the circuit breaker.
     pub consecutive_losses: AtomicUsize,
@@ -66,7 +67,7 @@ pub struct BotState {
 impl BotState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            traded_mints: RwLock::new(HashSet::new()),
+            traded_mints: RwLock::new(HashMap::new()),
             consecutive_losses: AtomicUsize::new(0),
             position_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_POSITIONS)),
             circuit_breaker_tripped_at: Mutex::new(None),
@@ -80,8 +81,19 @@ impl BotState {
     /// NOTE: This only guards against duplicate mints. The caller must ALSO
     /// call `try_acquire_position` to enforce the concurrent position cap.
     pub async fn try_lock_mint(&self, mint: &str) -> bool {
-        let mut mints = self.traded_mints.write().await; // yields task, not thread
-        mints.insert(mint.to_string())
+        const MINT_TTL: Duration = Duration::from_secs(4 * 3600); // 4-hour re-entry window
+        let mut mints = self.traded_mints.write().await;
+
+        // Prune entries older than TTL on every write. This is O(n) but n is
+        // bounded by MAX_CONCURRENT_POSITIONS and is called at most once per
+        // trade signal — negligible overhead vs. the RPC calls that follow.
+        mints.retain(|_, inserted_at| inserted_at.elapsed() < MINT_TTL);
+
+        if mints.contains_key(mint) {
+            return false; // Active or recently traded — skip.
+        }
+        mints.insert(mint.to_string(), Instant::now());
+        true
     }
 
     /// Attempts to acquire a position slot from the semaphore.

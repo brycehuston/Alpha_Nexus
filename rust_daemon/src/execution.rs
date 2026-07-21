@@ -30,6 +30,8 @@ pub async fn execute_pump_buy(
     // the watcher exits — ensuring the slot stays occupied for the entire
     // duration of the open position, not just the buy confirmation window.
     position_permit: tokio::sync::OwnedSemaphorePermit,
+    telegram_bot_token: Option<String>,
+    telegram_chat_id: Option<String>,
 ) {
     let wallet_address = bot_keypair.pubkey().to_string();
 
@@ -221,6 +223,8 @@ pub async fn execute_pump_buy(
     let state_clone   = bot_state.clone();
     let rpc_url_clone = rpc_url.clone();
     let mint_clone    = target_mint.clone();
+    let tg_token      = telegram_bot_token.clone();
+    let tg_chat       = telegram_chat_id.clone();
     tokio::spawn(async move {
         // Permit lives here. Drop happens when this async block exits.
         let _position_permit = position_permit;
@@ -231,6 +235,8 @@ pub async fn execute_pump_buy(
             keypair_clone,
             state_clone,
             rpc_url_clone,
+            tg_token,
+            tg_chat,
         ).await;
     });
 }

@@ -9,6 +9,10 @@ pub struct TokenMetadata {
     pub symbol: String,
     pub mc_formatted: String,
     pub age_formatted: String,
+    /// Raw `pairCreatedAt` timestamp from DexScreener in milliseconds.
+    /// Used by the token age filter in websocket.rs.
+    /// 0 means DexScreener did not return a timestamp (token too new or not indexed).
+    pub created_at_ms: u64,
 }
 
 pub async fn fetch_token_metadata(http_client: &Client, mint_address: &str) -> TokenMetadata {
@@ -19,6 +23,7 @@ pub async fn fetch_token_metadata(http_client: &Client, mint_address: &str) -> T
         symbol: "???".to_string(),
         mc_formatted: "N/A".to_string(),
         age_formatted: "0m".to_string(),
+        created_at_ms: 0,
     };
 
     if let Ok(res) = http_client.get(&url).timeout(std::time::Duration::from_millis(1500)).send().await {
@@ -34,6 +39,7 @@ pub async fn fetch_token_metadata(http_client: &Client, mint_address: &str) -> T
 
                         // Calculate Age
                         if let Some(created_at) = pair.get("pairCreatedAt").and_then(|c| c.as_u64()) {
+                            meta.created_at_ms = created_at; // expose raw ms for token age filter
                             let now_ms = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -162,6 +168,70 @@ pub async fn send_startup_alert(http_client: &Client, bot_token: &str, chat_id: 
         ʜᴛꜰ © ᴀʟᴘʜᴀ ᴀʟᴇʀᴛꜱ | v1.01",
         pubkey,
         time_str
+    );
+
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    let payload = json!({
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": true,
+    });
+
+    let _ = http_client.post(&url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await;
+}
+
+/// Sends a Telegram alert when the BOT closes one of its own positions.
+///
+/// Distinct from `send_telegram_alert` which fires on incoming whale signals.
+/// Called from exits.rs after the on-chain sell is confirmed.
+pub async fn send_bot_sell_alert(
+    http_client: &Client,
+    bot_token: &str,
+    chat_id: &str,
+    mint: &str,
+    pnl_usd: f64,
+    pnl_pct: f64,
+    exit_reason: &str,
+    exit_value_usd: f64,
+) {
+    let meta = fetch_token_metadata(http_client, mint).await;
+
+    let (icon, outcome) = if pnl_usd >= 0.0 {
+        ("✅", "PROFIT")
+    } else {
+        ("🛑", "STOP LOSS")
+    };
+    let pnl_sign = if pnl_usd >= 0.0 { "+" } else { "" };
+
+    let message = format!(
+        "<b>{icon} BOT EXIT — {outcome}</b>\n\
+        ━━━━━━━━━━━━━━━━━━━━━━━━\n\
+        <b>💎 Token:</b> {name} ({symbol})\n\
+        <code>{mint}</code>\n\n\
+        <b>💰 P&amp;L:</b> <code>{pnl_sign}${pnl_usd:.4} ({pnl_sign}{pnl_pct:.1}%)</code>\n\
+        <b>📤 Exit Value:</b> ${exit_value_usd:.4}\n\
+        <b>⚡ Trigger:</b> {exit_reason}\n\
+        <b>📊 Market Cap:</b> {mc}\n\n\
+        <a href=\"https://dexscreener.com/solana/{mint}\">DexScreener</a> | \
+        <a href=\"https://photon-sol.tinyastro.io/en/lp/{mint}\">Photon</a>\n\
+        ━━━━━━━━━━━━━━━━━━━━━━━━\n\
+        ʜᴛꜰ © ᴀʟᴘʜᴀ ᴀʟᴇʀᴛꜱ | v1.01",
+        icon = icon,
+        outcome = outcome,
+        name = meta.name,
+        symbol = meta.symbol,
+        mint = mint,
+        pnl_sign = pnl_sign,
+        pnl_usd = pnl_usd,
+        pnl_pct = pnl_pct.abs(),
+        exit_value_usd = exit_value_usd,
+        exit_reason = exit_reason,
+        mc = meta.mc_formatted,
     );
 
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
