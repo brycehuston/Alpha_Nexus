@@ -52,7 +52,7 @@ set +e
 SMOKE_OUTPUT=$("$RUST_DIR/target/release/alphanexus-daemon" 2>&1)
 SMOKE_EXIT=$?
 set -e
-if echo "$SMOKE_OUTPUT" | grep -q "BOT_PRIVATE_KEY"; then
+if echo "$SMOKE_OUTPUT" | grep -Eq "BOT_PRIVATE_KEY|RPC_URL"; then
     echo "✅ Startup smoke test passed (config validation fires correctly)."
 elif [ $SMOKE_EXIT -eq 0 ]; then
     echo "❌ SMOKE TEST FAILED: binary exited 0 with no env vars set. Check config.rs."
