@@ -19,7 +19,7 @@ def update_redis_whitelist():
     # We fetch the latest results instead of forcing an execution because free tier
     # or non-owner API keys throw a 403 Forbidden on the /execute endpoint.
     results = dune.get_latest_result(dune_query_id)
-    wallets = [row['smart_wallet_address'] for row in results.get_rows()]
+    wallets = list(set([row['wallet_address'] for row in results.get_rows() if 'wallet_address' in row]))
 
     if not wallets:
         print("WARNING: Dune returned 0 wallets. Skipping Redis update to avoid wiping whitelist.")
