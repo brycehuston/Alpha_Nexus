@@ -12,4 +12,5 @@ pub struct PumpTradeEvent {
     #[serde(rename = "tokenAmount")]
     #[allow(dead_code)] // Deserialized from WS payload; reserved for future position-sizing filters
     pub token_amount: f64,
+    pub signature: String,
 }

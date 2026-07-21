@@ -2,6 +2,8 @@ use crate::error::BotError;
 use crate::execution::execute_pump_buy;
 use crate::types::PumpTradeEvent;
 use crate::state::BotState;
+use crate::db;
+use crate::telegram;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::json;
@@ -42,6 +44,15 @@ const WS_RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// and verify the remote end is still responsive.
 const WS_PING_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Minimum SOL amount for a tracked wallet's BUY to be considered a genuine
+/// trade signal worth mirroring.
+///
+/// Trades below this threshold are dust movements, wallet top-ups, test
+/// transactions, or fee adjustments — they carry no directional conviction
+/// and are statistically uncorrelated with profitable entries. Filtering them
+/// eliminates noise signals before they consume any system resources.
+const MIN_WHALE_TRADE_SOL: f64 = 0.5;
+
 pub async fn run_listener(
     wallets: Vec<String>,
     api_key: String,
@@ -50,6 +61,8 @@ pub async fn run_listener(
     bot_keypair: Arc<Keypair>,
     bot_state: Arc<BotState>,
     rpc_url: String,
+    telegram_bot_token: Option<String>,
+    telegram_chat_id: Option<String>,
 ) -> Result<(), BotError> {
 
     // Construct WebSocket URL
@@ -124,32 +137,109 @@ pub async fn run_listener(
                                     // Non-trade messages (e.g. subscription ack) are
                                     // silently ignored by the Ok/Err pattern.
                                     if let Ok(event) = serde_json::from_str::<PumpTradeEvent>(&text) {
-                                        if event.tx_type == "buy" {
+                                        let is_buy = event.tx_type == "buy";
+                                        let is_sell = event.tx_type == "sell";
+
+                                        if is_buy || is_sell {
+                                            let direction = if is_buy { "BUY" } else { "SELL" };
                                             println!(
-                                                "🚨 Smart Money Alert: {} bought {} (Size: {} SOL)",
-                                                event.trader_public_key, event.mint, event.sol_amount
+                                                "🚨 Smart Money Alert: {} {} {} (Size: {} SOL)",
+                                                event.trader_public_key, direction, event.mint, event.sol_amount
                                             );
 
-                                            if bot_state.is_circuit_breaker_active() { continue 'connection; }
-                                            // FIX #4 callsite: try_lock_mint is now async
-                                            if !bot_state.try_lock_mint(&event.mint).await { continue 'connection; }
+                                            // 1. Log to DB
+                                            let status = if is_buy { "Executing..." } else { "Monitor only (SELL)" };
+                                            db::log_trade_telemetry(
+                                                &event.trader_public_key,
+                                                &event.mint,
+                                                direction,
+                                                event.sol_amount,
+                                                0.0,
+                                                status,
+                                            );
 
-                                            let target_mint    = event.mint.clone();
-                                            let rpc_clone      = rpc_client.clone();
-                                            let http_clone     = http_client.clone();
-                                            let keypair_clone  = bot_keypair.clone();
-                                            let state_clone    = bot_state.clone();
-                                            let rpc_url_clone  = rpc_url.clone();
+                                            // 2. Send Telegram Alert
+                                            if let (Some(token), Some(chat_id)) = (&telegram_bot_token, &telegram_chat_id) {
+                                                let net_change = if is_buy { event.token_amount } else { -event.token_amount };
+                                                let size_fmt = format!("{:.2} SOL", event.sol_amount);
+                                                
+                                                let t_mint = event.mint.clone();
+                                                let t_wallet = event.trader_public_key.clone();
+                                                let t_sig = event.signature.clone();
+                                                let t_status = status.to_string();
+                                                let http_clone = http_client.clone();
+                                                let t_token = token.clone();
+                                                let t_chat = chat_id.clone();
+                                                
+                                                tokio::spawn(async move {
+                                                    telegram::send_telegram_alert(
+                                                        &http_clone, &t_token, &t_chat,
+                                                        &t_mint, net_change, &t_wallet,
+                                                        &t_sig, &t_status, &size_fmt
+                                                    ).await;
+                                                });
+                                            }
 
-                                            // Fire and forget execution.
-                                            // FIX #3 (partial): the watcher task spawned inside
-                                            // execute_pump_buy now carries a 2-hour hard deadline.
-                                            tokio::spawn(async move {
-                                                execute_pump_buy(
-                                                    target_mint, rpc_clone, http_clone,
-                                                    keypair_clone, state_clone, rpc_url_clone,
-                                                ).await;
-                                            });
+                                            // 3. Execution (BUYs only)
+                                            if is_buy {
+                                                // DUST FILTER: Only mirror buys with genuine
+                                                // conviction. Sub-threshold trades are test
+                                                // transactions, fee top-ups, or noise — not
+                                                // signals. Filter before touching any state.
+                                                if event.sol_amount < MIN_WHALE_TRADE_SOL {
+                                                    println!(
+                                                        "🔕 Dust filter: ignoring {:.4} SOL buy from {} on {} \
+                                                         (minimum: {} SOL).",
+                                                        event.sol_amount,
+                                                        event.trader_public_key,
+                                                        event.mint,
+                                                        MIN_WHALE_TRADE_SOL
+                                                    );
+                                                    continue 'connection;
+                                                }
+
+                                                if bot_state.is_circuit_breaker_active() { continue 'connection; }
+
+                                                let position_permit = match bot_state.try_acquire_position() {
+                                                    Some(p) => p,
+                                                    None => {
+                                                        println!(
+                                                            "⚠️  Position cap reached ({}/{}) — skipping signal for {}.",
+                                                            bot_state.open_position_count(),
+                                                            crate::state::MAX_CONCURRENT_POSITIONS,
+                                                            event.mint
+                                                        );
+                                                        continue 'connection;
+                                                    }
+                                                };
+
+                                                if !bot_state.try_lock_mint(&event.mint).await {
+                                                    drop(position_permit);
+                                                    continue 'connection;
+                                                }
+
+                                                println!(
+                                                    "📊 Position slot acquired ({}/{}) for {}.",
+                                                    bot_state.open_position_count(),
+                                                    crate::state::MAX_CONCURRENT_POSITIONS,
+                                                    event.mint
+                                                );
+
+                                                let target_mint    = event.mint.clone();
+                                                let rpc_clone      = rpc_client.clone();
+                                                let http_clone     = http_client.clone();
+                                                let keypair_clone  = bot_keypair.clone();
+                                                let state_clone    = bot_state.clone();
+                                                let rpc_url_clone  = rpc_url.clone();
+
+                                                tokio::spawn(async move {
+                                                    execute_pump_buy(
+                                                        target_mint, rpc_clone, http_clone,
+                                                        keypair_clone, state_clone, rpc_url_clone,
+                                                        position_permit,
+                                                    ).await;
+                                                });
+                                            }
                                         }
                                     }
                                 }

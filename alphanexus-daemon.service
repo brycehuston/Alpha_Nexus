@@ -1,0 +1,34 @@
+[Unit]
+Description=Alpha Nexus Trading Daemon
+Documentation=https://github.com/FruxLabs/alphanexus_bot
+After=network-online.target redis.service
+Wants=network-online.target
+Requires=redis.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/alphanexus_bot
+
+# Load all secrets from the .env file — never hardcode in this unit file.
+EnvironmentFile=/home/ubuntu/alphanexus_bot/.env
+
+ExecStart=/home/ubuntu/alphanexus_bot/rust_daemon/target/release/alphanexus-daemon
+
+# Auto-restart on crash. 5-second delay prevents a tight crash loop from
+# hammering the RPC endpoint during a sustained API outage.
+Restart=on-failure
+RestartSec=5s
+
+# Hard limits — prevent a runaway process from consuming all OS resources.
+# LimitNOFILE: 65536 open file descriptors (needed for sustained websocket + RPC connections)
+LimitNOFILE=65536
+
+# Logging: journal captures stdout/stderr from println!/eprintln!
+# View live logs with: journalctl -u alphanexus-daemon -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alphanexus
+
+[Install]
+WantedBy=multi-user.target

@@ -1,26 +1,66 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
-// FIX #4: Replace std::sync::RwLock with tokio::sync::RwLock.
+use std::time::{Duration, Instant};
+use tokio::sync::{RwLock, Semaphore, OwnedSemaphorePermit};
+
+// ============================================================================
+// MAX_CONCURRENT_POSITIONS — Open Position Concurrency Cap
+// ============================================================================
 //
 // WHY THIS MATTERS:
-//   std::sync::RwLock is a blocking OS primitive. When held (even briefly), it
-//   blocks the underlying OS thread backing the Tokio executor. Under sustained
-//   WebSocket load, write contention across spawned tasks will stall the entire
-//   async runtime, delaying order execution and causing missed entries.
+//   Without a cap, a coordinated whale group buying 10+ tokens in 2 seconds
+//   causes the bot to open 10 simultaneous positions. Each position runs:
+//     - 30 RPC broadcast calls (buy)
+//     - 1 Jupiter price poll every 3 seconds (VBATS)
+//     - Up to 5×3 RPC calls per sell attempt
 //
-//   tokio::sync::RwLock is async-aware: it yields the task (not the thread)
-//   while waiting, keeping the executor free to process other work.
+//   At 10 concurrent positions, that's 300 concurrent buy broadcasts + 10
+//   Jupiter polls/3s = ~200 req/min just for price monitoring. This saturates
+//   Helius standard plan limits (~1000 req/s but with burst penalties), causes
+//   priority fee starvation as all positions compete to sell simultaneously,
+//   and creates a Jupiter API thundering herd on exit.
 //
-// CALLSITE CHANGE:
-//   try_lock_mint() is now async. All callers must .await it.
-use tokio::sync::RwLock;
+// FIX:
+//   A Tokio Semaphore with MAX_CONCURRENT_POSITIONS permits. Each call to
+//   `try_acquire_position` either returns a SemaphorePermit (held for the
+//   lifetime of the trade) or returns None (position skipped, logged).
+//   The permit is automatically released when the watcher task completes.
+//
+// TUNING:
+//   Set based on your Helius plan limits and acceptable capital exposure:
+//     - Paper Trading: 3 (conservative, easy to track in logs)
+//     - Standard plan: 5
+//     - Growth/Business plan: 10-15
+pub const MAX_CONCURRENT_POSITIONS: usize = 3;
+
+/// How long the circuit breaker blocks new trades after tripping.
+/// 30 minutes gives the market time to stabilize after 3 consecutive stop-losses
+/// without requiring a manual server restart.
+const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+
+/// Number of consecutive stop-losses that trigger the circuit breaker.
+const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
 
 pub struct BotState {
-    // Tracks tokens we are currently trading or have already traded.
+    /// Tracks mints we are currently trading or have already traded.
+    /// Prevents duplicate entries on the same token.
     pub traded_mints: RwLock<HashSet<String>>,
-    // Tracks consecutive stop-losses to trigger the circuit breaker.
+
+    /// Tracks consecutive stop-losses to trigger the circuit breaker.
     pub consecutive_losses: AtomicUsize,
+
+    /// Hard cap on simultaneous open positions.
+    /// Wrapped in Arc so we can call acquire_owned(), which returns a permit
+    /// with 'static lifetime that is safe to move into tokio::spawn tasks.
+    pub position_semaphore: Arc<Semaphore>,
+
+    /// Timestamp of the moment the circuit breaker first tripped.
+    /// `None` when the breaker is not active or has been auto-reset.
+    /// Uses std::sync::Mutex (not tokio) because reads are fast and
+    /// is_circuit_breaker_active must remain a synchronous fn for use
+    /// in the hot websocket loop without .await overhead.
+    circuit_breaker_tripped_at: Mutex<Option<Instant>>,
 }
 
 impl BotState {
@@ -28,19 +68,104 @@ impl BotState {
         Arc::new(Self {
             traded_mints: RwLock::new(HashSet::new()),
             consecutive_losses: AtomicUsize::new(0),
+            position_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_POSITIONS)),
+            circuit_breaker_tripped_at: Mutex::new(None),
         })
     }
 
     /// Atomically checks if we can trade this token, and locks it if we can.
     /// Returns true if the mint was freshly inserted (trade is allowed).
     /// Returns false if it was already present (duplicate — skip).
+    ///
+    /// NOTE: This only guards against duplicate mints. The caller must ALSO
+    /// call `try_acquire_position` to enforce the concurrent position cap.
     pub async fn try_lock_mint(&self, mint: &str) -> bool {
         let mut mints = self.traded_mints.write().await; // yields task, not thread
         mints.insert(mint.to_string())
     }
 
-    /// Checks if the circuit breaker is active (e.g., 3 consecutive losses).
+    /// Attempts to acquire a position slot from the semaphore.
+    ///
+    /// Returns `Some(permit)` if a slot is available. The caller MUST hold
+    /// this permit for the duration of the trade and drop it when the watcher
+    /// exits (dropping an OwnedSemaphorePermit releases it automatically).
+    ///
+    /// Returns `None` if MAX_CONCURRENT_POSITIONS are already open.
+    /// The caller should log and skip the signal — do NOT call try_lock_mint first;
+    /// check the semaphore first to avoid polluting traded_mints with mints
+    /// we never actually traded.
+    ///
+    /// Returns OwnedSemaphorePermit (not borrowed) so it can safely be moved
+    /// into tokio::spawn tasks across 'static lifetime boundaries.
+    pub fn try_acquire_position(&self) -> Option<OwnedSemaphorePermit> {
+        self.position_semaphore.clone().try_acquire_owned().ok()
+    }
+
+    /// Returns the number of currently open positions.
+    pub fn open_position_count(&self) -> usize {
+        MAX_CONCURRENT_POSITIONS - self.position_semaphore.available_permits()
+    }
+
+    /// Checks if the circuit breaker is active.
+    ///
+    /// # State Machine
+    ///
+    /// - **Below threshold** (`consecutive_losses < 3`): Returns `false`.
+    ///   Clears the trip timestamp in case it was set during a previous cycle.
+    ///
+    /// - **First trip** (threshold reached, no timestamp yet): Records
+    ///   `circuit_breaker_tripped_at = Instant::now()`, returns `true`.
+    ///   Logs a loud warning so operators know trading has been paused.
+    ///
+    /// - **In cooldown** (threshold reached, elapsed < 30 min): Returns `true`
+    ///   silently. Logging here would flood the output on every signal.
+    ///
+    /// - **Cooldown expired** (elapsed >= 30 min): Resets `consecutive_losses`
+    ///   to 0, clears the timestamp, returns `false`. Trading resumes.
+    ///   Logs a confirmation so operators know the bot self-recovered.
     pub fn is_circuit_breaker_active(&self) -> bool {
-        self.consecutive_losses.load(Ordering::SeqCst) >= 3
+        let losses = self.consecutive_losses.load(Ordering::SeqCst);
+
+        if losses < CIRCUIT_BREAKER_THRESHOLD {
+            // Below threshold — clear the trip timer from any previous cycle.
+            let mut guard = self.circuit_breaker_tripped_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = None;
+            return false;
+        }
+
+        let mut guard = self.circuit_breaker_tripped_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        match *guard {
+            None => {
+                // Circuit breaker tripping for the first time — record timestamp.
+                *guard = Some(Instant::now());
+                eprintln!(
+                    "🔴 CIRCUIT BREAKER TRIPPED: {} consecutive stop-losses. \
+                     Trading PAUSED for {} minutes. Will auto-reset.",
+                    losses,
+                    CIRCUIT_BREAKER_COOLDOWN.as_secs() / 60
+                );
+                true
+            }
+            Some(tripped_at) => {
+                if tripped_at.elapsed() >= CIRCUIT_BREAKER_COOLDOWN {
+                    // Cooldown expired — auto-reset and resume trading.
+                    self.consecutive_losses.store(0, Ordering::SeqCst);
+                    *guard = None;
+                    eprintln!(
+                        "🔄 Circuit breaker AUTO-RESET after {} minute cooldown. Trading RESUMED.",
+                        CIRCUIT_BREAKER_COOLDOWN.as_secs() / 60
+                    );
+                    false
+                } else {
+                    // Still in cooldown — silent return to avoid log flooding.
+                    true
+                }
+            }
+        }
     }
 }
