@@ -7,6 +7,7 @@ pub struct AppConfig {
     pub pumpportal_api_key: String,
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
+    pub dry_run: bool,
 }
 
 impl AppConfig {
@@ -95,12 +96,20 @@ impl AppConfig {
             println!("⚠️  TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — alerts disabled.");
         }
 
+        let dry_run_env = env::var("DRY_RUN").unwrap_or_else(|_| "false".to_string());
+        let dry_run = dry_run_env.to_lowercase() == "true" || dry_run_env == "1";
+
+        if dry_run {
+            println!("🧪 DRY RUN MODE ENABLED: Bot will simulate trades without risking real capital.");
+        }
+
         Ok(Self {
             rpc_url,
             bot_keypair,
             pumpportal_api_key,
             telegram_bot_token,
             telegram_chat_id,
+            dry_run,
         })
     }
 }

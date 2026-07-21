@@ -32,6 +32,7 @@ pub async fn execute_pump_buy(
     position_permit: tokio::sync::OwnedSemaphorePermit,
     telegram_bot_token: Option<String>,
     telegram_chat_id: Option<String>,
+    dry_run: bool,
 ) {
     let wallet_address = bot_keypair.pubkey().to_string();
 
@@ -52,6 +53,30 @@ pub async fn execute_pump_buy(
         target_mint, fee_lamports, priority_fee_sol
     );
 
+    if dry_run {
+        println!("🚀 [DRY RUN] Simulating buy execution for {}", target_mint);
+        // Simulate immediate confirmation and spawn exit watcher
+        let rpc_clone     = rpc_client.clone();
+        let http_clone    = http_client.clone();
+        let keypair_clone = bot_keypair.clone();
+        let state_clone   = bot_state.clone();
+        let rpc_url_clone = rpc_url.clone();
+        let mint_clone    = target_mint.clone();
+        let tg_token      = telegram_bot_token.clone();
+        let tg_chat       = telegram_chat_id.clone();
+        
+        tokio::spawn(async move {
+            let _position_permit = position_permit;
+            crate::exits::monitor_and_sell(
+                mint_clone, rpc_clone, http_clone, keypair_clone, state_clone, rpc_url_clone, tg_token, tg_chat, dry_run
+            ).await;
+        });
+        return;
+    }
+
+    // ========================================================================
+    // LIVE EXECUTION PATH
+    // ========================================================================
     let payload = json!({
         "publicKey": wallet_address,
         "action": "buy",
@@ -237,6 +262,7 @@ pub async fn execute_pump_buy(
             rpc_url_clone,
             tg_token,
             tg_chat,
+            dry_run,
         ).await;
     });
 }

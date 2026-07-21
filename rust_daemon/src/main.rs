@@ -101,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.rpc_url.clone(),
             config.telegram_bot_token.clone(),
             config.telegram_chat_id.clone(),
+            config.dry_run,
         ) => {
             if let Err(e) = result {
                 eprintln!("🚨 Fatal Listener Error: {}", e);

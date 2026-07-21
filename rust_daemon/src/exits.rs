@@ -117,10 +117,11 @@ pub async fn monitor_and_sell(
     rpc_url: String,
     telegram_bot_token: Option<String>,
     telegram_chat_id: Option<String>,
+    dry_run: bool,
 ) {
     match timeout(WATCHER_MAX_LIFETIME, monitor_and_sell_inner(
         target_mint.clone(), rpc_client, http_client, bot_keypair, bot_state, rpc_url,
-        telegram_bot_token, telegram_chat_id,
+        telegram_bot_token, telegram_chat_id, dry_run,
     )).await {
         Ok(()) => {}
         Err(_elapsed) => {
@@ -146,6 +147,7 @@ async fn monitor_and_sell_inner(
     rpc_url: String,
     telegram_bot_token: Option<String>,
     telegram_chat_id: Option<String>,
+    dry_run: bool,
 ) {
     let wallet_pubkey = bot_keypair.pubkey();
 
@@ -171,36 +173,42 @@ async fn monitor_and_sell_inner(
     let mut raw_balance = String::new();
     let mut ui_balance: f64 = 0.0;
 
-    for attempt in 0..15 {
-        sleep(Duration::from_secs(2)).await;
+    if dry_run {
+        println!("  [DRY RUN] Bypassing on-chain token balance check for {}.", target_mint);
+    } else {
+        for attempt in 0..15 {
+            sleep(Duration::from_secs(2)).await;
 
-        let token_account = match resolve_token_account(&rpc_client, &wallet_pubkey, &mint_pubkey).await {
-            Some(acct) => acct,
-            None => {
-                println!("  [{}/15] Token account not yet visible on-chain for {}...", attempt + 1, target_mint);
-                continue;
-            }
-        };
+            let token_account = match resolve_token_account(&rpc_client, &wallet_pubkey, &mint_pubkey).await {
+                Some(acct) => acct,
+                None => {
+                    println!("  [{}/15] Token account not yet visible on-chain for {}...", attempt + 1, target_mint);
+                    continue;
+                }
+            };
 
-        if let Ok(balance) = rpc_client.get_token_account_balance(&token_account).await {
-            if let Some(ui) = balance.ui_amount {
-                if ui > 0.0 {
-                    ui_balance = ui;
-                    raw_balance = balance.amount;
-                    println!("  [{}/15] ✅ Balance confirmed: {} tokens in account {}",
-                        attempt + 1, ui_balance, token_account);
-                    break;
+            if let Ok(balance) = rpc_client.get_token_account_balance(&token_account).await {
+                if let Some(ui) = balance.ui_amount {
+                    if ui > 0.0 {
+                        ui_balance = ui;
+                        raw_balance = balance.amount;
+                        println!("  [{}/15] ✅ Balance confirmed: {} tokens in account {}",
+                            attempt + 1, ui_balance, token_account);
+                        break;
+                    }
                 }
             }
         }
     }
 
-    if ui_balance == 0.0 {
+    if ui_balance == 0.0 && !dry_run {
         println!("❌ Buy for {} likely dropped (no balance after 30s). Terminating watcher.", target_mint);
         return;
     }
 
-    println!("✅ Buy confirmed! Tracking {} tokens. Starting VBATS...", ui_balance);
+    if !dry_run {
+        println!("✅ Buy confirmed! Tracking {} tokens. Starting VBATS...", ui_balance);
+    }
     let price_url = format!("https://api.jup.ag/price/v3?ids={},{}", target_mint, WSOL_MINT);
 
     // -----------------------------------------------------------------------
@@ -292,6 +300,11 @@ async fn monitor_and_sell_inner(
                     return;
                 }
                 continue;
+            }
+            if dry_run {
+                let invested_usd = 0.1 * sp;
+                ui_balance = invested_usd / tp;
+                println!("🧪 [DRY RUN] Simulating holding {:.2} tokens (worth {} SOL / ${:.4}).", ui_balance, 0.1, invested_usd);
             }
             entry_value_usd = ui_balance * tp;
             sol_price_usd = sp;
@@ -459,7 +472,7 @@ async fn monitor_and_sell_inner(
             );
             if execute_jupiter_sell(
                 &target_mint, &raw_balance, rpc_client.clone(),
-                http_client.clone(), bot_keypair.clone(), &rpc_url
+                http_client.clone(), bot_keypair.clone(), &rpc_url, dry_run
             ).await {
                 exit_value_usd = current_value_usd;
                 // Fire-and-forget sell alert — never block the exit path on HTTP.
@@ -496,7 +509,7 @@ async fn monitor_and_sell_inner(
             );
             if execute_jupiter_sell(
                 &target_mint, &raw_balance, rpc_client.clone(),
-                http_client.clone(), bot_keypair.clone(), &rpc_url
+                http_client.clone(), bot_keypair.clone(), &rpc_url, dry_run
             ).await {
                 exit_value_usd = current_value_usd;
                 // Fire-and-forget sell alert — never block the exit path on HTTP.
@@ -677,7 +690,15 @@ async fn execute_jupiter_sell(
     http_client: Arc<Client>,
     bot_keypair: Arc<Keypair>,
     rpc_url: &str,
+    dry_run: bool,
 ) -> bool {
+    if dry_run {
+        println!("💸 [DRY RUN] Simulating Jupiter sell for {}...", target_mint);
+        sleep(Duration::from_secs(1)).await;
+        println!("✅ [DRY RUN] Sell confirmed for {}!", target_mint);
+        return true;
+    }
+
     let wallet_address = bot_keypair.pubkey().to_string();
 
     // Fetch the base dynamic priority fee once upfront. Escalated per retry.

@@ -63,6 +63,7 @@ pub async fn run_listener(
     rpc_url: String,
     telegram_bot_token: Option<String>,
     telegram_chat_id: Option<String>,
+    dry_run: bool,
 ) -> Result<(), BotError> {
 
     // Construct WebSocket URL
@@ -265,6 +266,7 @@ pub async fn run_listener(
                                                         keypair_clone, state_clone, rpc_url_clone,
                                                         position_permit,
                                                         tg_token, tg_chat,
+                                                        dry_run,
                                                     ).await;
                                                 });
                                             }
