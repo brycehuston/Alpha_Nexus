@@ -1,6 +1,8 @@
 # ⚡ Alpha Nexus
 
 > **A high-performance, copy-trading bot for Solana meme coins built in Rust + Python.**
+
+> **Current worktree note (verified 2026-07-22):** accepted signals are routed to a local `shadow_ledger.jsonl` receipt in the active shadow-mode worktree; they do not invoke the retained PumpPortal buy path. Treat the execution and dry-run sections below as Generation 1 reference behaviour until the shadow pipeline has deterministic replay validation.
 > Alpha Nexus monitors a curated list of elite on-chain wallets ("smart money") in real time and mirrors their pump.fun buys instantly — before the market can react.
 
 ---
