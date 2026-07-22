@@ -1,0 +1,13 @@
+# Alpha Nexus — Candidate Wallets for Backtesting
+# ================================================
+# Add one Solana wallet address per line.
+# Lines starting with # are ignored.
+#
+# Where to find good candidates:
+#   - https://gmgn.ai/sol/wallets        (pump.fun smart money leaderboard)
+#   - https://cielo.finance               (top Solana traders by PnL)
+#   - https://bullx.io                    (smart money alerts)
+#   - https://photon-sol.twitfi.com       (pump.fun whale tracker)
+#
+# Paste the wallet addresses you found below:
+

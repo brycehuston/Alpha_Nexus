@@ -1,0 +1,38 @@
+Alpha Nexus uses a highly filtered, multi-layered logic pipeline to trigger a "smart money" buy. It doesn't just blindly buy when a wallet makes a move; it has to pass several strict gatekeepers first.
+
+Here is the exact logic sequence a trade must pass before Alpha Nexus pulls the trigger:
+
+1. The "Elite Wallet" Whitelist (The Source)
+The bot only listens to wallets that have a proven, mathematically verified track record. The Python data pipeline uses Dune Analytics to find wallets meeting these exact historical criteria:
+
+
+High Win Rate: A win rate greater than 60%.
+
+
+Profitability: A net positive ROI.
+
+
+Experience: A minimum of 10 trades.
+
+
+The Anti-MEV Filter: They must have traded fewer than 500 tokens (to filter out algorithmic sandwich bots that have fake 99% win rates on tiny margins).
+These wallets are loaded into your local Redis database as the smart_herd_wallets whitelist.
+
+2. Live WebSocket Ingestion
+The Rust daemon connects to the PumpPortal WebSocket using subscribeAccountTrade. It specifically tells PumpPortal to only stream events when one of the wallets on your Redis whitelist executes a transaction.
+
+3. The DEX-Agnostic Verification
+When an event arrives, the bot does not try to read the specific DEX's swap instructions (which would break if the wallet used a different router). Instead, it looks strictly at the state change: if the wallet's SOL balance went down and their balance of Token X went up, the bot confirms they bought Token X.
+
+4. The "Whale Dust" Filter (Minimum Size)
+This is the new guardrail we just added in the final audit. Even if an elite wallet buys a token, the bot checks the sol_amount. If the wallet spent less than 0.5 SOL, the bot ignores it. This ensures you are only mirroring trades where the whale has genuine conviction, protecting you from getting baited by 0.01 SOL test transactions.
+
+5. The Global State Checks (Risk Management)
+Before executing, the bot checks its internal memory (the RwLock state manager):
+
+Double-Buy Prevention: It checks if the token mint is already in its traded_mints list. If you've already bought it, it drops the signal.
+
+Circuit Breaker: It checks the AtomicUsize consecutive-loss counter. If the bot has taken 3 stop-losses in a row, the circuit breaker halts the trade to protect your capital from a shifting market regime (auto-resetting after 30 minutes).
+
+The Final Trigger:
+If an elite wallet makes a buy ≥ 0.5 SOL, and the token hasn't been bought before, and the circuit breaker is clear... Alpha Nexus instantly fires the raw bonding-curve transaction through the PumpPortal /trade-local API!

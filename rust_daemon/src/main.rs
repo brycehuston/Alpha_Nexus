@@ -39,10 +39,16 @@ use std::sync::Arc;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Initialize Alpha Nexus Daemon...");
 
-    // Attempt to load .env from the parent directory for local development/testing.
-    // In production (deploy.sh), the env vars are sourced by the bash script or systemd.
-    #[cfg(debug_assertions)]
-    let _ = dotenvy::from_path("../.env");
+    // Load .env for local development (both debug and release builds).
+    // Tries cwd first, then ../ then ../../ so the bot works whether you
+    // run from the project root OR rust_daemon/. In production (systemd),
+    // env vars are injected by the unit file — these are no-ops if no
+    // .env is found, so always safe to run.
+    if dotenvy::dotenv().is_err() {
+        if dotenvy::from_path("../.env").is_err() {
+            let _ = dotenvy::from_path("../../.env");
+        }
+    }
 
     // 1. Load configuration
     let config = config::AppConfig::load_from_env()?;

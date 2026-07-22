@@ -1,36 +1,45 @@
 import os
 import redis
-from dune_client.client import DuneClient
-from dune_client.query import QueryBase
+import requests
 
 def update_redis_whitelist():
     dune_api_key = os.environ.get("DUNE_API_KEY")
-    dune_query_id = int(os.environ.get("DUNE_QUERY_ID", 0))
+    dune_query_id = os.environ.get("DUNE_QUERY_ID", "0")
 
     if not dune_api_key:
         print("ERROR: DUNE_API_KEY not set. Aborting whitelist update.")
         return
-    if not dune_query_id:
+    if not dune_query_id or dune_query_id == "0":
         print("ERROR: DUNE_QUERY_ID not set. Aborting whitelist update.")
         return
 
     print(f"Fetching smart wallets from Dune query {dune_query_id}...")
-    dune = DuneClient(api_key=dune_api_key)
-    # We fetch the latest results instead of forcing an execution because free tier
-    # or non-owner API keys throw a 403 Forbidden on the /execute endpoint.
-    results = dune.get_latest_result(dune_query_id)
-    
-    # Filter and sort the wallets based on Option A requirements
+
+    # Use the free-tier compatible /query/{id}/results endpoint directly.
+    # The dune_client library's get_latest_result() routes through the execution
+    # endpoint which requires a paid plan (402). This endpoint works on free tier.
+    url = f"https://api.dune.com/api/v1/query/{dune_query_id}/results"
+    headers = {"X-Dune-API-Key": dune_api_key}
+    params = {"limit": 1000}
+
+    resp = requests.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        print(f"ERROR: Dune API returned {resp.status_code}: {resp.text}")
+        return
+
+    rows = resp.json().get("result", {}).get("rows", [])
+    print(f"Dune returned {len(rows)} raw rows.")
+
+    # Filter and sort the wallets based on criteria
     elite_wallets = []
-    for row in results.get_rows():
+    for row in rows:
         if 'wallet_address' not in row:
             continue
-            
-        # Parse metrics with fallbacks in case the query isn't fully updated yet
+
         win_rate = float(row.get('win_rate', 0.0))
         total_trades = int(row.get('total_trades', 0))
         net_profit_sol = float(row.get('net_profit_sol', 0.0))
-        
+
         # Apply strict filtering criteria
         if win_rate > 0.65 and total_trades > 50 and net_profit_sol > 10.0:
             elite_wallets.append({
@@ -39,7 +48,8 @@ def update_redis_whitelist():
             })
 
     if not elite_wallets:
-        print("WARNING: Dune returned 0 wallets passing criteria. Skipping Redis update to avoid wiping whitelist.")
+        print("WARNING: 0 wallets passed the filter criteria. Skipping Redis update.")
+        print("(Tip: Check your Dune query column names match: wallet_address, win_rate, total_trades, net_profit_sol)")
         return
 
     # Sort by net_profit_sol descending and slice top 50
@@ -53,9 +63,7 @@ def update_redis_whitelist():
     pipe.delete("smart_herd_wallets")
     pipe.sadd("smart_herd_wallets", *wallets)
     pipe.execute()
-    print(f"Redis updated. Restarting alphanexus-daemon...")
-    os.system("sudo systemctl restart alphanexus-daemon")
-    print("Done.")
+    print(f"✅ Redis updated with {len(wallets)} elite wallets. Ready to run the bot!")
 
 if __name__ == "__main__":
     update_redis_whitelist()

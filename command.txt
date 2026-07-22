@@ -1,0 +1,7 @@
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+
+$env:RPC_URL="https://mainnet.helius-rpc.com/?api-key=https://mainnet.helius-rpc.com/?api-key=dc712866-82f4-4987-940c-07eab65e427a"
+
+$env:DRY_RUN="true"
+
+cargo run --release

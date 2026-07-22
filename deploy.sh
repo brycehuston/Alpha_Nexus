@@ -24,7 +24,7 @@ fi
 # =============================================================================
 set -euo pipefail
 
-SERVER="ubuntu@3.85.117.17"
+SERVER="ubuntu@54.210.203.195"
 SSH_KEY="$HOME/.ssh/Fruxfi-key.pem"
 REMOTE_DIR="/home/ubuntu/alphanexus_bot"
 LOCAL_ROOT="$(cd "$(dirname "$0")" && pwd)"

@@ -1,2 +1,4 @@
 dune-client
 redis
+requests
+python-dotenv
