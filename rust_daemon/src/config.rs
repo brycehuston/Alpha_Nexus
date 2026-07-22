@@ -8,6 +8,7 @@ pub struct AppConfig {
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
     pub dry_run: bool,
+    pub trade_size_sol: f64,
 }
 
 impl AppConfig {
@@ -104,6 +105,11 @@ impl AppConfig {
             println!("⚠️  TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — alerts disabled.");
         }
 
+        let trade_size_sol = env::var("TRADE_SIZE_SOL")
+            .unwrap_or_else(|_| "0.1".to_string())
+            .parse::<f64>()
+            .unwrap_or(0.1);
+
         if dry_run {
             println!("🧪 DRY RUN MODE ENABLED: Bot will simulate trades without risking real capital.");
         }
@@ -115,6 +121,7 @@ impl AppConfig {
             telegram_bot_token,
             telegram_chat_id,
             dry_run,
+            trade_size_sol,
         })
     }
 }

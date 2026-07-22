@@ -29,6 +29,17 @@ pub fn init_db() {
         )
     ";
 
+    let create_open_positions_sql = "
+        CREATE TABLE IF NOT EXISTS open_positions (
+            token_mint TEXT PRIMARY KEY,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ";
+
+    if let Err(e) = conn.execute(create_open_positions_sql, []) {
+        eprintln!("⚠️  Failed to create open_positions table: {}", e);
+    }
+
     if let Err(e) = conn.execute(create_table_sql, []) {
         eprintln!("⚠️  Failed to create trade_logs table: {}", e);
     } else {
@@ -139,4 +150,40 @@ pub fn get_whale_history(wallet: &str, mint: &str) -> WhaleHistory {
     }
 
     history
+}
+
+pub fn insert_open_position(mint: &str) {
+    let lock = DB_CONN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(conn) = lock.as_ref() {
+        let sql = "INSERT OR REPLACE INTO open_positions (token_mint) VALUES (?1)";
+        if let Err(e) = conn.execute(sql, params![mint]) {
+            eprintln!("⚠️  Failed to insert open position {}: {}", mint, e);
+        }
+    }
+}
+
+pub fn remove_open_position(mint: &str) {
+    let lock = DB_CONN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(conn) = lock.as_ref() {
+        let sql = "DELETE FROM open_positions WHERE token_mint = ?1";
+        if let Err(e) = conn.execute(sql, params![mint]) {
+            eprintln!("⚠️  Failed to remove open position {}: {}", mint, e);
+        }
+    }
+}
+
+pub fn get_all_open_positions() -> Vec<String> {
+    let mut positions = Vec::new();
+    let lock = DB_CONN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(conn) = lock.as_ref() {
+        let sql = "SELECT token_mint FROM open_positions ORDER BY timestamp ASC";
+        if let Ok(mut stmt) = conn.prepare(sql) {
+            if let Ok(rows) = stmt.query_map([], |row| row.get(0)) {
+                for row in rows.flatten() {
+                    positions.push(row);
+                }
+            }
+        }
+    }
+    positions
 }

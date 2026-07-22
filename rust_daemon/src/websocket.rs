@@ -42,7 +42,7 @@ const WS_RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How often to send an application-level Ping to keep the connection alive
 /// and verify the remote end is still responsive.
-const WS_PING_INTERVAL: Duration = Duration::from_secs(10);
+const WS_PING_INTERVAL: Duration = Duration::from_secs(120);
 
 /// Minimum SOL amount for a tracked wallet's BUY to be considered a genuine
 /// trade signal worth mirroring.
@@ -64,6 +64,7 @@ pub async fn run_listener(
     telegram_bot_token: Option<String>,
     telegram_chat_id: Option<String>,
     dry_run: bool,
+    trade_size_sol: f64,
 ) -> Result<(), BotError> {
 
     // Construct WebSocket URL
@@ -148,11 +149,28 @@ pub async fn run_listener(
                                     // Parse directly into our strict Rust struct.
                                     // Non-trade messages (e.g. subscription ack) are
                                     // silently ignored by the Ok/Err pattern.
-                                    if let Ok(event) = serde_json::from_str::<PumpTradeEvent>(&text) {
+                                match serde_json::from_str::<PumpTradeEvent>(&text) {
+                                    Ok(event) => {
                                         let is_buy = event.tx_type == "buy";
                                         let is_sell = event.tx_type == "sell";
 
                                         if is_buy || is_sell {
+                                            // DUST FILTER: Ignore all noise/spam trades under the threshold
+                                            // before touching the DB, Telegram, or execution state.
+                                            if event.sol_amount < MIN_WHALE_TRADE_SOL {
+                                                let direction = if is_buy { "buy" } else { "sell" };
+                                                println!(
+                                                    "🔕 Dust filter: ignoring {:.4} SOL {} from {} on {} \
+                                                     (minimum: {} SOL).",
+                                                    event.sol_amount,
+                                                    direction,
+                                                    event.trader_public_key,
+                                                    event.mint,
+                                                    MIN_WHALE_TRADE_SOL
+                                                );
+                                                continue 'connection;
+                                            }
+
                                             let direction = if is_buy { "BUY" } else { "SELL" };
                                             println!(
                                                 "🚨 Smart Money Alert: {} {} {} (Size: {} SOL)",
@@ -194,21 +212,6 @@ pub async fn run_listener(
 
                                             // 3. Execution (BUYs only)
                                             if is_buy {
-                                                // DUST FILTER: Only mirror buys with genuine
-                                                // conviction. Sub-threshold trades are test
-                                                // transactions, fee top-ups, or noise — not
-                                                // signals. Filter before touching any state.
-                                                if event.sol_amount < MIN_WHALE_TRADE_SOL {
-                                                    println!(
-                                                        "🔕 Dust filter: ignoring {:.4} SOL buy from {} on {} \
-                                                         (minimum: {} SOL).",
-                                                        event.sol_amount,
-                                                        event.trader_public_key,
-                                                        event.mint,
-                                                        MIN_WHALE_TRADE_SOL
-                                                    );
-                                                    continue 'connection;
-                                                }
 
                                                 // ---- TOKEN AGE FILTER -----
                                                 // Skip tokens listed less than 60 seconds ago.
@@ -233,6 +236,27 @@ pub async fn run_listener(
                                                         );
                                                         continue 'connection;
                                                     }
+                                                }
+
+                                                // ---- MARKET CAP FILTER -----
+                                                if meta.raw_mc > 0.0 && (meta.raw_mc < 10_000.0 || meta.raw_mc > 2_000_000.0) {
+                                                    println!(
+                                                        "⚠️  Market Cap filter: {} is ${:.0}. \
+                                                         Must be between $10k and $2M. Skipping.",
+                                                        event.mint, meta.raw_mc
+                                                    );
+                                                    continue 'connection;
+                                                }
+
+                                                // ---- PREVIOUS BAG FILTER -----
+                                                let history = db::get_whale_history(&event.trader_public_key, &event.mint);
+                                                if history.buys >= 5 {
+                                                    println!(
+                                                        "⚠️  Bag filter: Wallet {} has already bought {} {} times. \
+                                                         Skipping to avoid buying their top.",
+                                                        event.trader_public_key, event.mint, history.buys
+                                                    );
+                                                    continue 'connection;
                                                 }
 
                                                 if bot_state.is_circuit_breaker_active() { continue 'connection; }
@@ -277,18 +301,28 @@ pub async fn run_listener(
                                                         keypair_clone, state_clone, rpc_url_clone,
                                                         position_permit,
                                                         tg_token, tg_chat,
-                                                        dry_run,
+                                                        dry_run, trade_size_sol
                                                     ).await;
                                                 });
                                             }
                                         }
                                     }
+                                    Err(e) => {
+                                        if text.contains("txType") {
+                                            println!("⚠️ JSON Parse Error on Trade Event: {}. Raw Payload: {}", e, text);
+                                        } else {
+                                            // Limit the length of the string printed to avoid spamming the terminal with massive arrays
+                                            let truncated: String = text.chars().take(150).collect();
+                                            println!("ℹ️ System WS Message: {}...", truncated);
+                                        }
+                                    }
+                                }
                                 }
                                 // Pong responses from our Ping frames arrive here.
                                 // No action needed — receiving them is sufficient
                                 // to reset the WS_RECEIVE_TIMEOUT on the next loop.
                                 Message::Pong(_) => {
-                                    // Connection is alive. Loop continues.
+                                    println!("💓 Heartbeat received from PumpPortal...");
                                 }
                                 Message::Close(_) => {
                                     eprintln!("🔴 WS received Close frame. Reconnecting...");

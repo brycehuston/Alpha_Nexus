@@ -138,6 +138,19 @@ pub async fn monitor_and_sell(
 // ============================================================================
 // INNER WATCHER -- Velocity-Based Adaptive Trailing Stop implementation
 // ============================================================================
+struct OpenPositionGuard {
+    mint: String,
+    dry_run: bool,
+}
+
+impl Drop for OpenPositionGuard {
+    fn drop(&mut self) {
+        if !self.dry_run {
+            crate::db::remove_open_position(&self.mint);
+        }
+    }
+}
+
 async fn monitor_and_sell_inner(
     target_mint: String,
     rpc_client: Arc<RpcClient>,
@@ -149,6 +162,11 @@ async fn monitor_and_sell_inner(
     telegram_chat_id: Option<String>,
     dry_run: bool,
 ) {
+    let _db_guard = OpenPositionGuard {
+        mint: target_mint.clone(),
+        dry_run,
+    };
+
     let wallet_pubkey = bot_keypair.pubkey();
 
     // FIX #8: Explicit mint parse with loud failure -- no silent System Program fallback.

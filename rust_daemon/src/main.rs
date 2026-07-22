@@ -85,6 +85,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bot_state = state::BotState::new();
 
+    // 3.5 Recover Open Positions from Database
+    let open_positions = db::get_all_open_positions();
+    for mint in open_positions {
+        if let Some(permit) = bot_state.try_acquire_position() {
+            bot_state.try_lock_mint(&mint).await;
+            
+            let rpc_clone = rpc_client.clone();
+            let http_clone = http_client.clone();
+            let keypair_clone = bot_keypair.clone();
+            let state_clone = bot_state.clone();
+            let rpc_url_clone = config.rpc_url.clone();
+            let tg_token = config.telegram_bot_token.clone();
+            let tg_chat = config.telegram_chat_id.clone();
+            let dry_run = config.dry_run;
+            
+            println!("🔄 RECOVERING OPEN POSITION: {} - Respawning exit watcher.", mint);
+            
+            tokio::spawn(async move {
+                let _permit = permit;
+                crate::exits::monitor_and_sell(
+                    mint,
+                    rpc_clone,
+                    http_clone,
+                    keypair_clone,
+                    state_clone,
+                    rpc_url_clone,
+                    tg_token,
+                    tg_chat,
+                    dry_run,
+                ).await;
+            });
+        } else {
+            eprintln!("⚠️  Could not recover position {} (Max positions reached).", mint);
+        }
+    }
+
     // 4. Start listener loop with graceful shutdown.
     //
     // tokio::select! races two futures:
@@ -112,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.telegram_bot_token.clone(),
             config.telegram_chat_id.clone(),
             config.dry_run,
+            config.trade_size_sol,
         ) => {
             if let Err(e) = result {
                 eprintln!("🚨 Fatal Listener Error: {}", e);

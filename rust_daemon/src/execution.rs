@@ -33,6 +33,7 @@ pub async fn execute_pump_buy(
     telegram_bot_token: Option<String>,
     telegram_chat_id: Option<String>,
     dry_run: bool,
+    trade_size_sol: f64,
 ) {
     let wallet_address = bot_keypair.pubkey().to_string();
 
@@ -81,14 +82,14 @@ pub async fn execute_pump_buy(
         "publicKey": wallet_address,
         "action": "buy",
         "mint": target_mint,
-        "amount": 0.1, // Fixed 0.1 SOL buy size (adjust as needed)
+        "amount": trade_size_sol, // Loaded dynamically from .env
         "denominatedInSol": "true",
         "slippage": 15, // 15% Slippage
         "priorityFee": priority_fee_sol, // Dynamic — market-responsive via Helius
         "pool": "pump"
     });
 
-    println!("⚡ Requesting Local TX for {}...", target_mint);
+    println!("⚡ Requesting Local TX for {} (Size: {} SOL)...", target_mint, trade_size_sol);
 
     // Call PumpPortal's Local Trade API
     let res = match http_client.post("https://pumpportal.fun/api/trade-local")
@@ -235,6 +236,10 @@ pub async fn execute_pump_buy(
 
     // Log the confirmed signature for auditability (useful for Paper Trading).
     println!("📋 Confirmed buy sig for {}: {}", target_mint, confirmed_sig);
+    
+    if !dry_run {
+        crate::db::insert_open_position(&target_mint);
+    }
 
     // Spawn the exit watcher ONLY after buy is confirmed on-chain.
     // The position_permit is moved HERE — into the watcher task — so the

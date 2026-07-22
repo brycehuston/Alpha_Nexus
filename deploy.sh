@@ -93,6 +93,9 @@ echo "▶ [4/6] Uploading files to server..."
 # Create remote directory structure
 ssh -i "$SSH_KEY" "$SERVER" "mkdir -p $REMOTE_DIR/rust_daemon/target/release $REMOTE_DIR/data_pipeline"
 
+# Stop the daemon first so we don't get a 'Text file busy' error when overwriting the binary
+ssh -i "$SSH_KEY" "$SERVER" "sudo systemctl stop alphanexus-daemon 2>/dev/null || true"
+
 # Upload release binary
 scp -i "$SSH_KEY" \
     "$RUST_DIR/target/release/alphanexus-daemon" \
@@ -142,8 +145,7 @@ set -a
 source .env
 set +a
 
-echo "  Running whitelist pipeline..."
-python3 data_pipeline/update_whitelist.py
+echo "  Skipping whitelist update (should be run via cron once per 24h to save Dune credits)..."
 
 echo "  Starting alphanexus-daemon..."
 sudo systemctl start alphanexus-daemon

@@ -13,6 +13,8 @@ pub struct TokenMetadata {
     /// Used by the token age filter in websocket.rs.
     /// 0 means DexScreener did not return a timestamp (token too new or not indexed).
     pub created_at_ms: u64,
+    /// Raw market cap in USD. 0.0 if not found.
+    pub raw_mc: f64,
 }
 
 pub async fn fetch_token_metadata(http_client: &Client, mint_address: &str) -> TokenMetadata {
@@ -24,6 +26,7 @@ pub async fn fetch_token_metadata(http_client: &Client, mint_address: &str) -> T
         mc_formatted: "N/A".to_string(),
         age_formatted: "0m".to_string(),
         created_at_ms: 0,
+        raw_mc: 0.0,
     };
 
     if let Ok(res) = http_client.get(&url).timeout(std::time::Duration::from_millis(1500)).send().await {
@@ -59,6 +62,7 @@ pub async fn fetch_token_metadata(http_client: &Client, mint_address: &str) -> T
 
                         // Format MC
                         if let Some(mc) = pair.get("marketCap").and_then(|m| m.as_f64()) {
+                            meta.raw_mc = mc;
                             if mc > 1_000_000.0 {
                                 meta.mc_formatted = format!("${:.2}M", mc / 1_000_000.0);
                             } else if mc > 0.0 {
