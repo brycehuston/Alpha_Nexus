@@ -1,6 +1,32 @@
 use solana_sdk::{signature::Keypair, signer::Signer};
 use std::env;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShadowStartupPolicy {
+    pub position_recovery_allowed: bool,
+    pub capital_execution_allowed: bool,
+}
+
+pub fn shadow_startup_policy(
+    dry_run_value: Option<&str>,
+) -> Result<ShadowStartupPolicy, crate::error::BotError> {
+    let shadow_mode_explicitly_enabled = dry_run_value
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1");
+
+    if !shadow_mode_explicitly_enabled {
+        return Err(crate::error::BotError::ConfigError(
+            "DRY_RUN=true is REQUIRED on this shadow-only branch. Startup aborted before any position recovery or capital execution path."
+                .to_string(),
+        ));
+    }
+
+    Ok(ShadowStartupPolicy {
+        position_recovery_allowed: false,
+        capital_execution_allowed: false,
+    })
+}
+
 pub struct AppConfig {
     pub rpc_url: String,
     pub bot_keypair: Keypair,
@@ -9,6 +35,7 @@ pub struct AppConfig {
     pub telegram_chat_id: Option<String>,
     pub dry_run: bool,
     pub trade_size_sol: f64,
+    pub startup_policy: ShadowStartupPolicy,
 }
 
 impl AppConfig {
@@ -22,8 +49,9 @@ impl AppConfig {
         // FALLBACK_PRIORITY_FEE with no warning. A misconfigured deploy would
         // produce real trades with systematically underpriced sell fees.
         // -----------------------------------------------------------------------
-        let dry_run_env = env::var("DRY_RUN").unwrap_or_else(|_| "false".to_string());
-        let dry_run = dry_run_env.to_lowercase() == "true" || dry_run_env == "1";
+        let dry_run_env = env::var("DRY_RUN").ok();
+        let startup_policy = shadow_startup_policy(dry_run_env.as_deref())?;
+        let dry_run = true;
 
         let rpc_url = env::var("RPC_URL").map_err(|_| {
             crate::error::BotError::ConfigError(
@@ -122,6 +150,35 @@ impl AppConfig {
             telegram_chat_id,
             dry_run,
             trade_size_sol,
+            startup_policy,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_dry_run_fails_closed() {
+        assert!(shadow_startup_policy(None).is_err());
+    }
+
+    #[test]
+    fn false_dry_run_fails_closed() {
+        assert!(shadow_startup_policy(Some("false")).is_err());
+    }
+
+    #[test]
+    fn invalid_dry_run_fails_closed() {
+        assert!(shadow_startup_policy(Some("shadow")).is_err());
+    }
+
+    #[test]
+    fn explicit_dry_run_allows_only_shadow_startup() {
+        let policy = shadow_startup_policy(Some("true")).expect("explicit shadow mode");
+
+        assert!(!policy.position_recovery_allowed);
+        assert!(!policy.capital_execution_allowed);
     }
 }

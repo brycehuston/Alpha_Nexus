@@ -10,18 +10,18 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 
 # Current Verified State
 
-- Last verified: 2026-07-22 15:32 PDT (UTC-07:00).
-- Branch: `chore/alpha-nexus-operating-baseline`, created from the checked-out `v0-shadow-mode` worktree.
-- Commit: `6798762e616203a2d56c699b0b03f2e8689a7160` (`feat: add Helius backtester, fix dry-run .env loading, professional README`).
-- Worktree: dirty before this baseline. Pre-existing modified paths are `command.txt`, `data_pipeline/backtest_wallets.py`, `data_pipeline/candidates.txt`, `rust_daemon/src/main.rs`, and `rust_daemon/src/websocket.rs`; pre-existing untracked work includes the shadow logger, alternate pipeline data/scripts, and local artifacts. Preserve them unless separately scoped.
+- Last verified: 2026-07-22.
+- Branch: `test/shadow-pipeline-replay-clean`, created from baseline commit `4703fc3`.
+- Commit state: the deterministic replay commit is amended with the validated fail-closed shadow-startup correction; use `git log -1` for its current hash.
+- Worktree: clean after the amended commit. The separate original dirty worktree remains untouched.
 - Toolchain: Cargo 1.97.1 and rustc 1.97.1; Python 3.13.5. Cargo is installed locally but was not on this shell's `PATH`.
-- Build: `cargo check --locked` passes. It reports nine warnings because the shadow worktree leaves the compiled live-buy path and related listener inputs unused; Solana client 1.18.26 also has a future-incompatibility notice.
-- Tests: `cargo test --locked` passes with zero tests. Python syntax compilation passes for the primary and alternate backtest scripts.
-- Formatting: `cargo fmt --check` fails across existing Rust formatting. `git diff --check` finds one trailing whitespace issue in the pre-existing `websocket.rs` change. Neither is fixed by this baseline.
-- Runtime mode: `.env` verifies `DRY_RUN=true`; secret-bearing variables are set but were not read or displayed. The active WebSocket gate path records shadow receipts instead of invoking buy execution.
+- Build: `cargo check --locked` passes. Dormant execution and exit code produces expected unused-code warnings; Solana client 1.18.26 also has a future-incompatibility notice.
+- Tests: `cargo test --locked` passes with five deterministic tests: four startup-policy cases and one shadow-pipeline replay.
+- Formatting: repository-wide `cargo fmt --check` still fails from verified pre-existing drift. Changed Rust hunks conform to rustfmt output, and `git diff --check` is clean.
+- Runtime mode: startup requires explicit `DRY_RUN=true` (or `1`) before any clients, database initialization, recovery, or listener startup. Missing, invalid, or false values terminate startup. The resulting policy forbids position recovery and capital execution.
 - Deployment: `deploy.sh` and `alphanexus-daemon.service` exist; no local runtime or VPS evidence establishes a deployed daemon.
 - Data/providers: Redis is hard-coded to local `redis://127.0.0.1/`; the wallet pipeline uses Helius/Dune where configured. PumpPortal WebSocket and external price/alert services are part of the daemon path.
-- Primary blocker: the active shadow signal pipeline has no deterministic, non-network behavioural test or replay fixture.
+- Primary blocker: none for the fail-closed startup and deterministic replay scope.
 
 # Non-Negotiable Constraints
 
@@ -41,30 +41,31 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 1. Python data-pipeline scripts select wallets and can seed Redis set `smart_herd_wallets`.
 2. The Tokio daemon loads configuration, initializes SQLite telemetry, gets the Redis wallet whitelist, and subscribes to PumpPortal `subscribeAccountTrade`.
 3. `websocket.rs` applies direction, whale-size, token-age, market-cap, history, circuit-breaker, position-cap, and duplicate-mint gates; it also logs telemetry and may send Telegram alerts.
-4. The active dirty worktree writes an accepted-buy `ShadowReceipt` to `shadow_ledger.jsonl` rather than calling `execution::execute_pump_buy`.
-5. Retained but inactive execution code can request PumpPortal buy transactions; retained exit code uses Jupiter sell transactions, RPC confirmation, SQLite open-position recovery, and `BotState` circuit/position controls.
-6. The live execution path is compiled but unreferenced in the active worktree. Its runtime safety is therefore unverified by this baseline.
+4. The active listener writes an accepted-buy `ShadowReceipt` to `shadow_ledger.jsonl` rather than calling `execution::execute_pump_buy`.
+5. Retained but inactive execution and exit code remains compiled as Generation 1 evidence and fallback.
+6. Startup fails closed unless shadow mode is explicitly enabled; position recovery, `monitor_and_sell`, buy execution, and sell execution have no active call path.
 
 # Execution Plan
 
 - [x] Inspect repository, Git history/status, configuration mode, architecture, tests, deployment files, and provider usage.
 - [x] Establish this operating baseline without changing bot behaviour.
-- [~] Add a deterministic, non-network replay test for the active shadow signal pipeline: verify one eligible buy receipt and representative sell, dust, token-age/market-cap, duplicate-mint, position-cap, and circuit-breaker rejections.
-- [ ] Reassess live execution only after the replay test supplies repeatable gate evidence.
+- [x] Add a deterministic, non-network replay test for the active shadow signal pipeline: verify one eligible buy receipt and representative sell, dust, token-age/market-cap, duplicate-mint, position-cap, circuit-breaker, and bag rejections through the production decision path.
+- [x] Enforce fail-closed shadow startup before position recovery, monitor startup, or capital execution.
+- [~] Independently review the fail-closed shadow startup and replay-test commit.
 - [-] Generation 2 redesign or migration: explicitly deferred pending an independent design and shadow-testing decision.
 
 # Current Action
 
-Implement the fixture-driven, non-network shadow signal replay test and keep live execution disabled.
+Independently review the fail-closed shadow startup and replay-test commit.
 
 # Validation Evidence
 
-- `cargo check --locked`: passed; nine dormant-live-path warnings and one future-incompatibility notice.
-- `cargo test --locked`: passed; 0 passed, 0 failed because no tests are defined.
-- `cargo fmt --check`: failed due to pre-existing repository-wide formatting drift.
+- `cargo check --locked`: passed; dormant execution/exit warnings and one future-incompatibility notice remain.
+- `cargo test --locked`: passed; 5 passed, 0 failed. Startup-policy and replay tests are deterministic and require no external services, credentials, or filesystem state.
+- `cargo fmt --check`: fails on the untouched baseline's repository-wide formatting drift; changed replay-test files were reviewed separately and introduce no whitespace errors.
 - `python -m py_compile data_pipeline\\backtest_wallets.py data_pipeline\\update_whitelist.py data_pipeline\\backtest_wallets2.py`: passed.
 - Daemon startup/replay: not run. It would require external PumpPortal, provider, alert, and local-write isolation not supplied by the repository.
 
 # Blockers
 
-- No deterministic fixture or replay boundary exercises the active shadow pipeline; compilation cannot prove signal-gate or runtime behaviour.
+- No implementation blocker remains; repository-wide Rust formatting drift predates this scoped patch.

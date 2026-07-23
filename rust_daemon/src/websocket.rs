@@ -1,9 +1,9 @@
-use crate::error::BotError;
-use crate::execution::execute_pump_buy;
-use crate::types::PumpTradeEvent;
-use crate::state::BotState;
 use crate::db;
+use crate::error::BotError;
+use crate::shadow_logger::{ShadowLogger, ShadowReceipt};
+use crate::state::BotState;
 use crate::telegram;
+use crate::types::PumpTradeEvent;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::json;
@@ -13,6 +13,105 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SignalRejection {
+    Dust,
+    Sell,
+    TokenAge,
+    MarketCap,
+    Bag,
+    CircuitBreaker,
+    PositionCap,
+    DuplicateMint,
+}
+
+#[derive(Clone, Copy)]
+pub struct SlowGateInputs {
+    pub created_at_ms: u64,
+    pub raw_market_cap: f64,
+    pub history_buys: i32,
+    pub now_ms: u64,
+    pub decision_latency_ms: f64,
+}
+
+pub fn evaluate_fast_gates(event: &PumpTradeEvent) -> Result<(), SignalRejection> {
+    if event.sol_amount < MIN_WHALE_TRADE_SOL {
+        return Err(SignalRejection::Dust);
+    }
+
+    if event.tx_type == "sell" {
+        return Err(SignalRejection::Sell);
+    }
+
+    Ok(())
+}
+
+pub async fn evaluate_slow_gates_and_emit_receipt(
+    event: &PumpTradeEvent,
+    bot_state: &Arc<BotState>,
+    inputs: SlowGateInputs,
+    receipt_sink: &tokio::sync::mpsc::UnboundedSender<ShadowReceipt>,
+) -> Result<(), SignalRejection> {
+    if inputs.created_at_ms > 0 && inputs.now_ms.saturating_sub(inputs.created_at_ms) < 60_000 {
+        return Err(SignalRejection::TokenAge);
+    }
+
+    if inputs.raw_market_cap > 0.0
+        && (inputs.raw_market_cap < 10_000.0 || inputs.raw_market_cap > 2_000_000.0)
+    {
+        return Err(SignalRejection::MarketCap);
+    }
+
+    if inputs.history_buys >= 5 {
+        return Err(SignalRejection::Bag);
+    }
+
+    if bot_state.is_circuit_breaker_active() {
+        return Err(SignalRejection::CircuitBreaker);
+    }
+
+    let _position_permit = bot_state
+        .try_acquire_position()
+        .ok_or(SignalRejection::PositionCap)?;
+
+    if !bot_state.try_lock_mint(&event.mint).await {
+        return Err(SignalRejection::DuplicateMint);
+    }
+
+    let receipt = ShadowReceipt {
+        signature: event.signature.clone(),
+        observed_at_ms: inputs.now_ms as u128,
+        wallet: event.trader_public_key.clone(),
+        mint: event.mint.clone(),
+        classification: "BUY".to_string(),
+        sol_spent: event.sol_amount,
+        tokens_received: 0.0,
+        gate_whitelist: true,
+        gate_state_change: true,
+        gate_size: true,
+        gate_double_buy: true,
+        gate_circuit_breaker: true,
+        decision: "WOULD_BUY".to_string(),
+        decision_latency_ms: inputs.decision_latency_ms,
+        entry_price_simulated: inputs.raw_market_cap,
+        estimated_priority_fee_sol: 0.000125,
+        reason: "ALL_GATES_PASSED".to_string(),
+    };
+
+    let _ = receipt_sink.send(receipt);
+    Ok(())
+}
+
+pub async fn evaluate_shadow_signal(
+    event: &PumpTradeEvent,
+    bot_state: &Arc<BotState>,
+    inputs: SlowGateInputs,
+    receipt_sink: &tokio::sync::mpsc::UnboundedSender<ShadowReceipt>,
+) -> Result<(), SignalRejection> {
+    evaluate_fast_gates(event)?;
+    evaluate_slow_gates_and_emit_receipt(event, bot_state, inputs, receipt_sink).await
+}
 
 // FIX #5: Half-Open WebSocket Detection
 //
@@ -76,6 +175,13 @@ pub async fn run_listener(
 
     // Auto-reconnect loop
     loop {
+        let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(receipt) = receipt_rx.recv().await {
+                ShadowLogger::append_receipt(receipt).await;
+            }
+        });
+
         println!("Connecting to PumpPortal WS...");
         let (ws_stream, _) = match connect_async(&ws_url).await {
             Ok(stream) => stream,
@@ -157,7 +263,9 @@ pub async fn run_listener(
                                         if is_buy || is_sell {
                                             // DUST FILTER: Ignore all noise/spam trades under the threshold
                                             // before touching the DB, Telegram, or execution state.
-                                            if event.sol_amount < MIN_WHALE_TRADE_SOL {
+                                            if let Err(SignalRejection::Dust) =
+                                                evaluate_fast_gates(&event)
+                                            {
                                                 let direction = if is_buy { "buy" } else { "sell" };
                                                 println!(
                                                     "🔕 Dust filter: ignoring {:.4} SOL {} from {} on {} \
@@ -210,100 +318,73 @@ pub async fn run_listener(
                                                 });
                                             }
 
-                                            // 3. Execution (BUYs only)
+                                            // 3. Shadow decision (BUYs only)
                                             if is_buy {
-
-                                                // ---- TOKEN AGE FILTER -----
-                                                // Skip tokens listed less than 60 seconds ago.
-                                                // New tokens are maximum rug risk — the deployer
-                                                // can pull liquidity before any watcher exits.
-                                                // The DexScreener call has a 1.5s timeout (same as
-                                                // the Telegram alert path) so latency cost is minimal.
+                                                let evaluation_started = std::time::Instant::now();
                                                 let meta = crate::telegram::fetch_token_metadata(
                                                     &http_client, &event.mint
                                                 ).await;
-                                                if meta.created_at_ms > 0 {
-                                                    let now_ms = std::time::SystemTime::now()
-                                                        .duration_since(std::time::UNIX_EPOCH)
-                                                        .unwrap_or_default()
-                                                        .as_millis() as u64;
-                                                    let age_ms = now_ms.saturating_sub(meta.created_at_ms);
-                                                    if age_ms < 60_000 {
+                                                let history = db::get_whale_history(
+                                                    &event.trader_public_key,
+                                                    &event.mint,
+                                                );
+                                                let inputs = SlowGateInputs {
+                                                    created_at_ms: meta.created_at_ms,
+                                                    raw_market_cap: meta.raw_mc,
+                                                    history_buys: history.buys,
+                                                    now_ms: ShadowLogger::now_ms() as u64,
+                                                    decision_latency_ms: evaluation_started
+                                                        .elapsed()
+                                                        .as_secs_f64()
+                                                        * 1000.0,
+                                                };
+
+                                                match evaluate_shadow_signal(
+                                                    &event,
+                                                    &bot_state,
+                                                    inputs,
+                                                    &receipt_tx,
+                                                ).await {
+                                                    Err(SignalRejection::TokenAge) => {
+                                                        let age_ms = inputs
+                                                            .now_ms
+                                                            .saturating_sub(inputs.created_at_ms);
                                                         println!(
                                                             "⚠️  Token age filter: {} is only {}s old. \
                                                              Skipping to avoid sub-60s rug.",
                                                             event.mint, age_ms / 1000
                                                         );
-                                                        continue 'connection;
                                                     }
-                                                }
-
-                                                // ---- MARKET CAP FILTER -----
-                                                if meta.raw_mc > 0.0 && (meta.raw_mc < 10_000.0 || meta.raw_mc > 2_000_000.0) {
-                                                    println!(
-                                                        "⚠️  Market Cap filter: {} is ${:.0}. \
-                                                         Must be between $10k and $2M. Skipping.",
-                                                        event.mint, meta.raw_mc
-                                                    );
-                                                    continue 'connection;
-                                                }
-
-                                                // ---- PREVIOUS BAG FILTER -----
-                                                let history = db::get_whale_history(&event.trader_public_key, &event.mint);
-                                                if history.buys >= 5 {
-                                                    println!(
-                                                        "⚠️  Bag filter: Wallet {} has already bought {} {} times. \
-                                                         Skipping to avoid buying their top.",
-                                                        event.trader_public_key, event.mint, history.buys
-                                                    );
-                                                    continue 'connection;
-                                                }
-
-                                                if bot_state.is_circuit_breaker_active() { continue 'connection; }
-
-                                                let position_permit = match bot_state.try_acquire_position() {
-                                                    Some(p) => p,
-                                                    None => {
+                                                    Err(SignalRejection::MarketCap) => {
+                                                        println!(
+                                                            "⚠️  Market Cap filter: {} is ${:.0}. \
+                                                             Must be between $10k and $2M. Skipping.",
+                                                            event.mint, inputs.raw_market_cap
+                                                        );
+                                                    }
+                                                    Err(SignalRejection::Bag) => {
+                                                        println!(
+                                                            "⚠️  Bag filter: Wallet {} has already bought {} {} times. \
+                                                             Skipping to avoid buying their top.",
+                                                            event.trader_public_key,
+                                                            event.mint,
+                                                            inputs.history_buys
+                                                        );
+                                                    }
+                                                    Err(SignalRejection::PositionCap) => {
                                                         println!(
                                                             "⚠️  Position cap reached ({}/{}) — skipping signal for {}.",
                                                             bot_state.open_position_count(),
                                                             crate::state::MAX_CONCURRENT_POSITIONS,
                                                             event.mint
                                                         );
-                                                        continue 'connection;
                                                     }
-                                                };
-
-                                                if !bot_state.try_lock_mint(&event.mint).await {
-                                                    drop(position_permit);
-                                                    continue 'connection;
+                                                    Err(SignalRejection::CircuitBreaker)
+                                                    | Err(SignalRejection::DuplicateMint)
+                                                    | Ok(()) => {}
+                                                    Err(SignalRejection::Dust)
+                                                    | Err(SignalRejection::Sell) => {}
                                                 }
-
-                                                println!(
-                                                    "📊 Position slot acquired ({}/{}) for {}.",
-                                                    bot_state.open_position_count(),
-                                                    crate::state::MAX_CONCURRENT_POSITIONS,
-                                                    event.mint
-                                                );
-
-                                                let target_mint    = event.mint.clone();
-                                                let rpc_clone      = rpc_client.clone();
-                                                let http_clone     = http_client.clone();
-                                                let keypair_clone  = bot_keypair.clone();
-                                                let state_clone    = bot_state.clone();
-                                                let rpc_url_clone  = rpc_url.clone();
-                                                let tg_token       = telegram_bot_token.clone();
-                                                let tg_chat        = telegram_chat_id.clone();
-
-                                                tokio::spawn(async move {
-                                                    execute_pump_buy(
-                                                        target_mint, rpc_clone, http_clone,
-                                                        keypair_clone, state_clone, rpc_url_clone,
-                                                        position_permit,
-                                                        tg_token, tg_chat,
-                                                        dry_run, trade_size_sol
-                                                    ).await;
-                                                });
                                             }
                                         }
                                     }
@@ -348,5 +429,181 @@ pub async fn run_listener(
 
         // Brief pause before reconnect attempt to avoid hammering the server.
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    const NOW_MS: u64 = 1_700_000_000_000;
+
+    fn event(tx_type: &str, sol_amount: f64, mint: &str) -> PumpTradeEvent {
+        PumpTradeEvent {
+            signature: "signature_123".to_string(),
+            mint: mint.to_string(),
+            trader_public_key: "wallet_123".to_string(),
+            tx_type: tx_type.to_string(),
+            token_amount: 1_000.0,
+            sol_amount,
+        }
+    }
+
+    fn accepted_inputs() -> SlowGateInputs {
+        SlowGateInputs {
+            created_at_ms: NOW_MS - 120_000,
+            raw_market_cap: 50_000.0,
+            history_buys: 0,
+            now_ms: NOW_MS,
+            decision_latency_ms: 1.5,
+        }
+    }
+
+    async fn run_decision(
+        event: &PumpTradeEvent,
+        bot_state: &Arc<BotState>,
+        inputs: SlowGateInputs,
+    ) -> (Result<(), SignalRejection>, Vec<ShadowReceipt>) {
+        let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = evaluate_shadow_signal(event, bot_state, inputs, &receipt_tx).await;
+        let mut receipts = Vec::new();
+
+        while let Ok(receipt) = receipt_rx.try_recv() {
+            receipts.push(receipt);
+        }
+
+        (result, receipts)
+    }
+
+    async fn assert_rejected(
+        event: &PumpTradeEvent,
+        bot_state: &Arc<BotState>,
+        inputs: SlowGateInputs,
+        expected: SignalRejection,
+    ) {
+        let (result, receipts) = run_decision(event, bot_state, inputs).await;
+        assert_eq!(result, Err(expected));
+        assert_eq!(receipts.len(), 0, "rejected signals must not emit receipts");
+    }
+
+    #[tokio::test]
+    async fn deterministic_shadow_pipeline_replay() {
+        let accepted_event = event("buy", 1.0, "mint_accepted");
+        let accepted_state = BotState::new();
+        let (result, receipts) =
+            run_decision(&accepted_event, &accepted_state, accepted_inputs()).await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            receipts.len(),
+            1,
+            "accepted signal emits exactly one receipt"
+        );
+        let receipt = &receipts[0];
+        assert_eq!(receipt.wallet, "wallet_123");
+        assert_eq!(receipt.mint, "mint_accepted");
+        assert_eq!(receipt.sol_spent, 1.0);
+        assert_eq!(receipt.classification, "BUY");
+        assert_eq!(receipt.decision, "WOULD_BUY");
+        assert_eq!(receipt.reason, "ALL_GATES_PASSED");
+        assert!(receipt.gate_whitelist);
+        assert!(receipt.gate_state_change);
+        assert!(receipt.gate_size);
+        assert!(receipt.gate_double_buy);
+        assert!(receipt.gate_circuit_breaker);
+
+        let sell_state = BotState::new();
+        assert_rejected(
+            &event("sell", 1.0, "mint_sell"),
+            &sell_state,
+            accepted_inputs(),
+            SignalRejection::Sell,
+        )
+        .await;
+
+        let dust_state = BotState::new();
+        assert_rejected(
+            &event("buy", 0.1, "mint_dust"),
+            &dust_state,
+            accepted_inputs(),
+            SignalRejection::Dust,
+        )
+        .await;
+
+        let token_age_state = BotState::new();
+        let token_age_inputs = SlowGateInputs {
+            created_at_ms: NOW_MS - 30_000,
+            ..accepted_inputs()
+        };
+        assert_rejected(
+            &event("buy", 1.0, "mint_token_age"),
+            &token_age_state,
+            token_age_inputs,
+            SignalRejection::TokenAge,
+        )
+        .await;
+
+        let market_cap_state = BotState::new();
+        let market_cap_inputs = SlowGateInputs {
+            raw_market_cap: 3_000_000.0,
+            ..accepted_inputs()
+        };
+        assert_rejected(
+            &event("buy", 1.0, "mint_market_cap"),
+            &market_cap_state,
+            market_cap_inputs,
+            SignalRejection::MarketCap,
+        )
+        .await;
+
+        let duplicate_state = BotState::new();
+        assert!(duplicate_state.try_lock_mint("mint_duplicate").await);
+        assert_rejected(
+            &event("buy", 1.0, "mint_duplicate"),
+            &duplicate_state,
+            accepted_inputs(),
+            SignalRejection::DuplicateMint,
+        )
+        .await;
+
+        let position_cap_state = BotState::new();
+        let mut permits = Vec::new();
+        while let Some(permit) = position_cap_state.try_acquire_position() {
+            permits.push(permit);
+        }
+        assert_rejected(
+            &event("buy", 1.0, "mint_position_cap"),
+            &position_cap_state,
+            accepted_inputs(),
+            SignalRejection::PositionCap,
+        )
+        .await;
+        drop(permits);
+
+        let circuit_breaker_state = BotState::new();
+        circuit_breaker_state
+            .consecutive_losses
+            .store(3, Ordering::SeqCst);
+        assert_rejected(
+            &event("buy", 1.0, "mint_circuit_breaker"),
+            &circuit_breaker_state,
+            accepted_inputs(),
+            SignalRejection::CircuitBreaker,
+        )
+        .await;
+
+        let bag_state = BotState::new();
+        let bag_inputs = SlowGateInputs {
+            history_buys: 5,
+            ..accepted_inputs()
+        };
+        assert_rejected(
+            &event("buy", 1.0, "mint_bag"),
+            &bag_state,
+            bag_inputs,
+            SignalRejection::Bag,
+        )
+        .await;
     }
 }
