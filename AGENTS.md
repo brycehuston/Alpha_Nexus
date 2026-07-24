@@ -4,6 +4,34 @@
 
 Alpha Nexus Generation 1 is an experimental Solana smart-wallet signal collector and copy-trading daemon. The current worktree is configured for dry-run shadow collection: accepted signals are recorded as hypothetical trades while the retained live execution code remains inactive.
 
+## FRUX NAV Task Continuity Protocol
+
+FRUX NAV is used only for tasks that span multiple sessions, branches,
+worktrees, agents, or high-consequence implementation. Do not use it for
+small single-session changes.
+
+When FRUX NAV is active, `PLAN.md` must contain one concise continuity line:
+
+`Task: <TASK_ID> | Checkpoint: <CXX> | State: <STATE> | Branch: <BRANCH> | Commit: <SHORT_COMMIT> | Resume: <TASK_ID>.<CXX>@<SHORT_COMMIT>`
+
+Rules:
+
+- Read `AGENTS.md` and `PLAN.md`, then verify repository, branch, commit,
+  worktree, and Current Action before changing files.
+- The recorded Task ID and Current Action define the authorized scope.
+- Continuity metadata does not authorize commits, pushes, deployments,
+  service changes, or broader work.
+- Keep exactly one active `[~]` item and exactly one Current Action.
+- Advance a checkpoint only after verified progress that materially changes
+  the resumable state.
+- Do not increment checkpoints for discussion, planning, failed commands,
+  or unverified edits.
+- If the recorded continuity state conflicts with Git or runtime evidence,
+  stop and report the mismatch instead of silently rewriting it.
+- Record concise handoff evidence in the existing `Validation Evidence`
+  section of `PLAN.md`. Do not create a separate ops-ledger file.
+- Remove or archive FRUX NAV metadata when the task is completed.
+
 ## Required workflow
 
 Before modifying code:
