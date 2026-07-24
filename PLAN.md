@@ -10,18 +10,18 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 
 # Current Verified State
 
-- Last verified: 2026-07-22.
+- Last verified: 2026-07-23.
 - Branch: `test/shadow-pipeline-replay-clean`, created from baseline commit `4703fc3`.
-- Commit state: the deterministic replay commit is amended with the validated fail-closed shadow-startup correction; use `git log -1` for its current hash.
-- Worktree: clean after the amended commit. The separate original dirty worktree remains untouched.
+- Commit state: HEAD remains `d041ef7`; the approved corrected production/replay entry path and shadow-position lifecycle are ready to commit. Canonical Generation 1 baseline approval is complete after this commit.
+- Worktree: modified only in `PLAN.md`, `README.md`, `rust_daemon/src/db.rs`, `rust_daemon/src/state.rs`, `rust_daemon/src/telegram.rs`, and `rust_daemon/src/websocket.rs`. The separate original dirty worktree remains untouched.
 - Toolchain: Cargo 1.97.1 and rustc 1.97.1; Python 3.13.5. Cargo is installed locally but was not on this shell's `PATH`.
 - Build: `cargo check --locked` passes. Dormant execution and exit code produces expected unused-code warnings; Solana client 1.18.26 also has a future-incompatibility notice.
-- Tests: `cargo test --locked` passes with five deterministic tests: four startup-policy cases and one shadow-pipeline replay.
-- Formatting: repository-wide `cargo fmt --check` still fails from verified pre-existing drift. Changed Rust hunks conform to rustfmt output, and `git diff --check` is clean.
+- Tests: `cargo test --locked` passes with five deterministic tests: four startup-policy cases and one expanded production-path shadow replay.
+- Formatting: targeted `rustfmt --edition 2021 --check` passes for all four changed Rust files. Repository-wide formatting drift outside this scope remains pre-existing.
 - Runtime mode: startup requires explicit `DRY_RUN=true` (or `1`) before any clients, database initialization, recovery, or listener startup. Missing, invalid, or false values terminate startup. The resulting policy forbids position recovery and capital execution.
 - Deployment: `deploy.sh` and `alphanexus-daemon.service` exist; no local runtime or VPS evidence establishes a deployed daemon.
 - Data/providers: Redis is hard-coded to local `redis://127.0.0.1/`; the wallet pipeline uses Helius/Dune where configured. PumpPortal WebSocket and external price/alert services are part of the daemon path.
-- Primary blocker: none for the fail-closed startup and deterministic replay scope.
+- Primary blocker: none. Independent review passed with no blocking findings.
 
 # Non-Negotiable Constraints
 
@@ -40,8 +40,8 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 
 1. Python data-pipeline scripts select wallets and can seed Redis set `smart_herd_wallets`.
 2. The Tokio daemon loads configuration, initializes SQLite telemetry, gets the Redis wallet whitelist, and subscribes to PumpPortal `subscribeAccountTrade`.
-3. `websocket.rs` applies direction, whale-size, token-age, market-cap, history, circuit-breaker, position-cap, and duplicate-mint gates; it also logs telemetry and may send Telegram alerts.
-4. The active listener writes an accepted-buy `ShadowReceipt` to `shadow_ledger.jsonl` rather than calling `execution::execute_pump_buy`.
+3. Production and replay both call `process_shadow_event`. It applies cheap deterministic gates before invoking injected enrichment, fails closed on enrichment errors, and then applies token-age, market-cap, history, circuit-breaker, position-cap, and duplicate-mint gates.
+4. An accepted BUY retains its semaphore permit in mint-keyed shadow-position state for four hours or until explicit release, then emits one `ShadowReceipt` to the active listener's `shadow_ledger.jsonl` sink.
 5. Retained but inactive execution and exit code remains compiled as Generation 1 evidence and fallback.
 6. Startup fails closed unless shadow mode is explicitly enabled; position recovery, `monitor_and_sell`, buy execution, and sell execution have no active call path.
 
@@ -51,21 +51,29 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 - [x] Establish this operating baseline without changing bot behaviour.
 - [x] Add a deterministic, non-network replay test for the active shadow signal pipeline: verify one eligible buy receipt and representative sell, dust, token-age/market-cap, duplicate-mint, position-cap, circuit-breaker, and bag rejections through the production decision path.
 - [x] Enforce fail-closed shadow startup before position recovery, monitor startup, or capital execution.
-- [~] Independently review the fail-closed shadow startup and replay-test commit.
+- [x] Independently review the fail-closed shadow startup and replay-test commit; rejected because the production/replay entry paths differ and accepted permits are dropped immediately.
+- [x] Correct the production/replay entry path, fail-closed lazy enrichment, and retained four-hour shadow-position lifecycle; validate cap fill, explicit release, and deterministic expiry through ordinary accepted events.
+- [x] Independently review the corrected production/replay entry path and shadow position lifecycle; passed with no blocking findings.
+- [~] Push the approved baseline branch and open a pull request.
 - [-] Generation 2 redesign or migration: explicitly deferred pending an independent design and shadow-testing decision.
 
 # Current Action
 
-Independently review the fail-closed shadow startup and replay-test commit.
+Push the approved baseline branch and open a pull request.
 
 # Validation Evidence
 
+- `rustfmt --edition 2021 --check src/state.rs src/websocket.rs src/telegram.rs src/db.rs`: passed.
+- Independent review: passed; blocking findings: none.
 - `cargo check --locked`: passed; dormant execution/exit warnings and one future-incompatibility notice remain.
-- `cargo test --locked`: passed; 5 passed, 0 failed. Startup-policy and replay tests are deterministic and require no external services, credentials, or filesystem state.
-- `cargo fmt --check`: fails on the untouched baseline's repository-wide formatting drift; changed replay-test files were reviewed separately and introduce no whitespace errors.
+- `cargo test --locked`: passed; 5 passed, 0 failed. The replay exercises the production entry function with deterministic in-memory enrichment and no external services, credentials, database, or filesystem state.
+- Unified production/replay decision path: verified.
+- Four-hour retained shadow-position lifecycle: verified.
+- Explicit and TTL capacity release: verified.
+- Live execution, recovery, and `monitor_and_sell`: unreachable.
 - `python -m py_compile data_pipeline\\backtest_wallets.py data_pipeline\\update_whitelist.py data_pipeline\\backtest_wallets2.py`: passed.
 - Daemon startup/replay: not run. It would require external PumpPortal, provider, alert, and local-write isolation not supplied by the repository.
 
 # Blockers
 
-- No implementation blocker remains; repository-wide Rust formatting drift predates this scoped patch.
+- No known implementation blocker remains in the corrected working tree. The canonical Generation 1 baseline approval is complete after this commit; repository-wide formatting drift outside the changed files predates this patch.

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore, OwnedSemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 // ============================================================================
 // MAX_CONCURRENT_POSITIONS — Open Position Concurrency Cap
@@ -34,6 +34,10 @@ use tokio::sync::{RwLock, Semaphore, OwnedSemaphorePermit};
 //     - Growth/Business plan: 10-15
 pub const MAX_CONCURRENT_POSITIONS: usize = 3;
 
+/// Accepted shadow positions retain their capacity for the same four-hour
+/// window used by the duplicate-mint guard.
+pub(crate) const SHADOW_POSITION_TTL_MS: u64 = 4 * 60 * 60 * 1000;
+
 /// How long the circuit breaker blocks new trades after tripping.
 /// 30 minutes gives the market time to stabilize after 3 consecutive stop-losses
 /// without requiring a manual server restart.
@@ -41,6 +45,11 @@ const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
 /// Number of consecutive stop-losses that trigger the circuit breaker.
 const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
+
+struct ShadowPosition {
+    opened_at_ms: u64,
+    _position_permit: OwnedSemaphorePermit,
+}
 
 pub struct BotState {
     /// Tracks mints we are currently trading or have already traded.
@@ -56,6 +65,11 @@ pub struct BotState {
     /// with 'static lifetime that is safe to move into tokio::spawn tasks.
     pub position_semaphore: Arc<Semaphore>,
 
+    /// Accepted hypothetical positions keyed by mint. Owning the semaphore
+    /// permit here keeps the production position cap active after the decision
+    /// function returns.
+    shadow_positions: RwLock<HashMap<String, ShadowPosition>>,
+
     /// Timestamp of the moment the circuit breaker first tripped.
     /// `None` when the breaker is not active or has been auto-reset.
     /// Uses std::sync::Mutex (not tokio) because reads are fast and
@@ -70,6 +84,7 @@ impl BotState {
             traded_mints: RwLock::new(HashMap::new()),
             consecutive_losses: AtomicUsize::new(0),
             position_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_POSITIONS)),
+            shadow_positions: RwLock::new(HashMap::new()),
             circuit_breaker_tripped_at: Mutex::new(None),
         })
     }
@@ -118,6 +133,60 @@ impl BotState {
         MAX_CONCURRENT_POSITIONS - self.position_semaphore.available_permits()
     }
 
+    /// Retains an accepted shadow position and its capacity permit.
+    ///
+    /// Returns false if the mint already has a retained shadow position. The
+    /// supplied permit is then dropped on return and capacity is restored.
+    pub(crate) async fn retain_shadow_position(
+        &self,
+        mint: &str,
+        opened_at_ms: u64,
+        position_permit: OwnedSemaphorePermit,
+    ) -> bool {
+        let mut positions = self.shadow_positions.write().await;
+        if positions.contains_key(mint) {
+            return false;
+        }
+
+        positions.insert(
+            mint.to_string(),
+            ShadowPosition {
+                opened_at_ms,
+                _position_permit: position_permit,
+            },
+        );
+        true
+    }
+
+    /// Explicitly closes a retained shadow position and releases its permit.
+    ///
+    /// The duplicate-mint guard is deliberately left intact until its normal
+    /// four-hour expiry, preventing an early release from enabling a re-buy.
+    pub(crate) async fn release_shadow_position(&self, mint: &str) -> bool {
+        self.shadow_positions.write().await.remove(mint).is_some()
+    }
+
+    /// Releases retained shadow positions whose deterministic event-time
+    /// lifetime has expired.
+    pub(crate) async fn prune_expired_shadow_positions(&self, now_ms: u64) {
+        let mut positions = self.shadow_positions.write().await;
+        positions.retain(|_, position| {
+            now_ms.saturating_sub(position.opened_at_ms) < SHADOW_POSITION_TTL_MS
+        });
+    }
+
+    pub(crate) async fn has_shadow_position(&self, mint: &str) -> bool {
+        self.shadow_positions.read().await.contains_key(mint)
+    }
+
+    pub(crate) async fn shadow_position_count(&self) -> usize {
+        self.shadow_positions.read().await.len()
+    }
+
+    pub(crate) async fn has_traded_mint(&self, mint: &str) -> bool {
+        self.traded_mints.read().await.contains_key(mint)
+    }
+
     /// Checks if the circuit breaker is active.
     ///
     /// # State Machine
@@ -140,14 +209,16 @@ impl BotState {
 
         if losses < CIRCUIT_BREAKER_THRESHOLD {
             // Below threshold — clear the trip timer from any previous cycle.
-            let mut guard = self.circuit_breaker_tripped_at
+            let mut guard = self
+                .circuit_breaker_tripped_at
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *guard = None;
             return false;
         }
 
-        let mut guard = self.circuit_breaker_tripped_at
+        let mut guard = self
+            .circuit_breaker_tripped_at
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
