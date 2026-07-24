@@ -22,9 +22,28 @@ import sys
 import time
 import csv
 import json
+import math
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
+
+
+def configure_stdout_utf8(stream) -> None:
+    """Use UTF-8 when a standard text stream supports reconfiguration."""
+    encoding = getattr(stream, "encoding", None)
+    reconfigure = getattr(stream, "reconfigure", None)
+    if (
+        callable(reconfigure)
+        and isinstance(encoding, str)
+        and encoding.lower().replace("_", "-") not in {"utf-8", "utf8"}
+    ):
+        try:
+            reconfigure(encoding="utf-8")
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+
+configure_stdout_utf8(sys.stdout)
 
 # ── Load .env ──────────────────────────────────────────────────────────────────
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -119,36 +138,96 @@ def parse_trade(tx: dict, wallet: str) -> dict | None:
       { mint, direction: 'buy'|'sell', sol_amount, token_amount }
     Returns None if the transaction can't be parsed cleanly.
     """
-    token_transfers = tx.get("tokenTransfers", [])
-    native_transfers = tx.get("nativeTransfers", [])
+    account_data = tx.get("accountData")
+    if (
+        not isinstance(account_data, list)
+        or not all(isinstance(account, dict) for account in account_data)
+    ):
+        return None
 
-    # Calculate net SOL movement for this wallet
-    sol_out = sum(t["amount"] for t in native_transfers
-                  if t.get("fromUserAccount") == wallet) / 1e9
-    sol_in  = sum(t["amount"] for t in native_transfers
-                  if t.get("toUserAccount") == wallet) / 1e9
-    net_sol = sol_in - sol_out  # positive = received SOL (sell), negative = spent SOL (buy)
+    wallet_accounts = [
+        account for account in account_data
+        if account.get("account") == wallet
+    ]
+    if len(wallet_accounts) != 1:
+        return None
+
+    native_balance_change = wallet_accounts[0].get("nativeBalanceChange")
+    if (
+        isinstance(native_balance_change, bool)
+        or not isinstance(native_balance_change, (int, float))
+        or (
+            isinstance(native_balance_change, float)
+            and not math.isfinite(native_balance_change)
+        )
+        or native_balance_change == 0
+    ):
+        return None
+
+    # Wallet-native balance change is already net of all lamport movements.
+    net_sol = native_balance_change / 1e9
+    sol_direction = "sell" if net_sol > 0 else "buy"
+
+    transaction_fee = tx.get("fee")
+    if (
+        sol_direction == "buy"
+        and tx.get("feePayer") == wallet
+        and not isinstance(transaction_fee, bool)
+        and isinstance(transaction_fee, (int, float))
+        and (
+            not isinstance(transaction_fee, float)
+            or math.isfinite(transaction_fee)
+        )
+        and transaction_fee >= abs(native_balance_change)
+    ):
+        return None
 
     # Find the non-WSOL token mint involved
-    mint = None
-    token_amount = 0.0
+    token_transfers = tx.get("tokenTransfers")
+    if (
+        not isinstance(token_transfers, list)
+        or not all(isinstance(transfer, dict) for transfer in token_transfers)
+    ):
+        return None
+
+    wallet_token_transfers = []
     for t in token_transfers:
         if t.get("mint") == WSOL_MINT:
             continue
-        if t.get("fromUserAccount") == wallet or t.get("toUserAccount") == wallet:
-            mint = t.get("mint")
-            token_amount = t.get("tokenAmount", 0)
-            break
 
-    if not mint or abs(net_sol) < 0.001:
+        from_wallet = t.get("fromUserAccount") == wallet
+        to_wallet = t.get("toUserAccount") == wallet
+        if from_wallet and to_wallet:
+            return None
+        if not from_wallet and not to_wallet:
+            continue
+
+        mint = t.get("mint")
+        token_amount = t.get("tokenAmount")
+        if (
+            not mint
+            or isinstance(token_amount, bool)
+            or not isinstance(token_amount, (int, float))
+            or (isinstance(token_amount, float) and not math.isfinite(token_amount))
+            or token_amount <= 0
+        ):
+            return None
+
+        token_direction = "sell" if from_wallet else "buy"
+        wallet_token_transfers.append((mint, token_amount, token_direction))
+
+    if len(wallet_token_transfers) != 1 or abs(net_sol) < 0.001:
         return None  # dust or unparseable
 
-    direction = "sell" if net_sol > 0 else "buy"
+    mint, token_amount, token_direction = wallet_token_transfers[0]
+    if token_direction != sol_direction:
+        return None
+
     sol_amount = abs(net_sol)
 
     return {
         "mint":         mint,
-        "direction":    direction,
+        "direction":    sol_direction,
         "sol_amount":   sol_amount,
         "token_amount": token_amount,
         "signature":    tx.get("signature", ""),
