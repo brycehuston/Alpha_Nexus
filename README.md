@@ -1,6 +1,8 @@
 # ⚡ Alpha Nexus
 
 > **A high-performance, copy-trading bot for Solana meme coins built in Rust + Python.**
+
+> **Current worktree note (verified 2026-07-23):** this Generation 1 branch is intentionally shadow-only. Accepted signals are routed to a local `shadow_ledger.jsonl` receipt and retain hypothetical position capacity; they do not invoke the retained PumpPortal buy or sell paths. The corrected production/replay path is awaiting independent re-review before this worktree can be accepted as a canonical baseline.
 > Alpha Nexus monitors a curated list of elite on-chain wallets ("smart money") in real time and mirrors their pump.fun buys instantly — before the market can react.
 
 ---
@@ -215,13 +217,13 @@ You should see:
 ```
 Initialize Alpha Nexus Daemon...
 🔑 Loaded trading wallet: <your-pubkey>
-🧪 DRY RUN MODE ENABLED: Bot will simulate trades without risking real capital.
+🧪 DRY RUN MODE ENABLED: Bot will record shadow decisions without risking real capital.
 🟢 WS Connected. Subscribing to 47 elite wallets...
 ```
 
-### 5. Go Live
+### 5. Shadow-Only Safety Boundary
 
-When you've validated the dry run, set `DRY_RUN=false` in your `.env` and redeploy.
+This branch requires `DRY_RUN=true` (or `1`). Missing, invalid, or false values abort startup before position recovery or capital execution. There is no live-enablement procedure for this branch; the retained execution and exit modules remain inactive Generation 1 reference code.
 
 ---
 
@@ -240,8 +242,8 @@ Copy `example.env` to `.env` and fill in your values:
 | `DUNE_API_KEY` | ⚠️ Optional | Only needed if using `update_whitelist.py` |
 | `DUNE_QUERY_ID` | ⚠️ Optional | Your Dune query ID |
 | `TRADE_SIZE_SOL` | ✅ | SOL amount per mirror trade (e.g. `0.1`) |
-| `DRY_RUN` | ✅ | `true` = simulate only, `false` = live trading |
-| `AUTO_EXECUTE` | ✅ | Master kill switch for execution |
+| `DRY_RUN` | ✅ | Must be `true` or `1`; all other values fail closed |
+| `AUTO_EXECUTE` | ⚠️ Reference only | Does not activate retained execution code on this shadow-only branch |
 
 > ⚠️ **Never commit your `.env` file.** It is git-ignored by default.
 
@@ -339,7 +341,7 @@ journalctl -u alphanexus-daemon -f
 
 | Feature | Implementation |
 |---------|---------------|
-| **Dry Run Mode** | `DRY_RUN=true` simulates all trades end-to-end with zero capital risk |
+| **Dry Run Mode** | `DRY_RUN=true` records accepted decisions as shadow receipts; capital execution is unreachable |
 | **Circuit Breaker** | Halts all trading for 30 min after 3 consecutive stop-losses (`state.rs`) |
 | **Position Cap** | Max 3 concurrent open positions via Tokio `Semaphore` (`state.rs`) |
 | **Dust Filter** | Ignores trades < 0.5 SOL to avoid bait signals (`websocket.rs`) |
@@ -354,4 +356,4 @@ journalctl -u alphanexus-daemon -f
 
 ## ⚠️ Disclaimer
 
-Alpha Nexus is experimental software for educational purposes. Meme coin trading carries **extreme financial risk**. You can lose your entire trading balance. Always start with `DRY_RUN=true`, use only capital you can afford to lose, and never trade with your primary wallet.
+Alpha Nexus is experimental software for educational purposes. Meme coin trading carries **extreme financial risk**. This branch must remain in its required shadow-only mode with `DRY_RUN=true`; it does not provide a live-enablement procedure.

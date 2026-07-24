@@ -1,6 +1,6 @@
+use lazy_static::lazy_static;
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
-use lazy_static::lazy_static;
 
 lazy_static! {
     // We use a global mutex for simplicity since DB writes are low-frequency compared to the main loop.
@@ -94,62 +94,69 @@ pub struct WhaleHistory {
     pub status: String,
 }
 
-pub fn get_whale_history(wallet: &str, mint: &str) -> WhaleHistory {
-    let mut history = WhaleHistory {
+fn empty_whale_history() -> WhaleHistory {
+    WhaleHistory {
         buys: 0,
         sells: 0,
         net_sol: 0.0,
         status: "Unknown".to_string(),
-    };
+    }
+}
 
+pub fn try_get_whale_history(wallet: &str, mint: &str) -> Result<WhaleHistory, String> {
+    let mut history = empty_whale_history();
     let lock = DB_CONN.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(conn) = lock.as_ref() {
-        let sql = "
-            SELECT trade_direction, trade_size_sol
-            FROM trade_logs
-            WHERE wallet_address = ?1 AND token_mint = ?2
-        ";
+    let conn = lock
+        .as_ref()
+        .ok_or_else(|| "trade telemetry database is unavailable".to_string())?;
+    let sql = "
+        SELECT trade_direction, trade_size_sol
+        FROM trade_logs
+        WHERE wallet_address = ?1 AND token_mint = ?2
+    ";
 
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(_) => return history,
-        };
-
-        let rows = stmt.query_map(params![wallet, mint], |row| {
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|error| format!("failed to prepare whale-history query: {error}"))?;
+    let rows = stmt
+        .query_map(params![wallet, mint], |row| {
             let direction: String = row.get(0)?;
-            let size_sol: f64 = row.get(1).unwrap_or(0.0);
+            let size_sol: f64 = row.get(1)?;
             Ok((direction, size_sol))
-        });
+        })
+        .map_err(|error| format!("failed to query whale history: {error}"))?;
 
-        if let Ok(iter) = rows {
-            let mut buy_sol = 0.0;
-            let mut sell_sol = 0.0;
+    let mut buy_sol = 0.0;
+    let mut sell_sol = 0.0;
 
-            for row in iter.flatten() {
-                let (direction, size) = row;
-                if direction == "BUY" {
-                    history.buys += 1;
-                    buy_sol += size;
-                } else if direction == "SELL" {
-                    history.sells += 1;
-                    sell_sol += size;
-                }
-            }
-
-            history.net_sol = buy_sol - sell_sol;
-            
-            // Format to 4 decimal places
-            history.net_sol = (history.net_sol * 10000.0).round() / 10000.0;
-
-            if history.net_sol > 0.0 {
-                history.status = "Holding/Accumulating".to_string();
-            } else {
-                history.status = "Exited/Sold All".to_string();
-            }
+    for row in rows {
+        let (direction, size) =
+            row.map_err(|error| format!("failed to read whale-history row: {error}"))?;
+        if direction == "BUY" {
+            history.buys += 1;
+            buy_sol += size;
+        } else if direction == "SELL" {
+            history.sells += 1;
+            sell_sol += size;
         }
     }
 
-    history
+    history.net_sol = buy_sol - sell_sol;
+
+    // Format to 4 decimal places
+    history.net_sol = (history.net_sol * 10000.0).round() / 10000.0;
+
+    if history.net_sol > 0.0 {
+        history.status = "Holding/Accumulating".to_string();
+    } else {
+        history.status = "Exited/Sold All".to_string();
+    }
+
+    Ok(history)
+}
+
+pub fn get_whale_history(wallet: &str, mint: &str) -> WhaleHistory {
+    try_get_whale_history(wallet, mint).unwrap_or_else(|_| empty_whale_history())
 }
 
 pub fn insert_open_position(mint: &str) {

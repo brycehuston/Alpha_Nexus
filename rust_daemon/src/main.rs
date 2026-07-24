@@ -4,6 +4,7 @@ mod error;
 mod execution;
 mod exits;
 mod redis_client;
+mod shadow_logger;
 mod state;
 mod telegram;
 mod types;
@@ -52,6 +53,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load configuration
     let config = config::AppConfig::load_from_env()?;
+    let startup_policy = config.startup_policy;
+
+    if startup_policy.position_recovery_allowed || startup_policy.capital_execution_allowed {
+        return Err(crate::error::BotError::ConfigError(
+            "Invalid startup policy: this branch permits shadow collection only.".to_string(),
+        )
+        .into());
+    }
     
     // 2. Initialize shared HTTP/RPC clients
     let rpc_client = Arc::new(RpcClient::new_with_commitment(
@@ -91,41 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bot_state = state::BotState::new();
 
-    // 3.5 Recover Open Positions from Database
-    let open_positions = db::get_all_open_positions();
-    for mint in open_positions {
-        if let Some(permit) = bot_state.try_acquire_position() {
-            bot_state.try_lock_mint(&mint).await;
-            
-            let rpc_clone = rpc_client.clone();
-            let http_clone = http_client.clone();
-            let keypair_clone = bot_keypair.clone();
-            let state_clone = bot_state.clone();
-            let rpc_url_clone = config.rpc_url.clone();
-            let tg_token = config.telegram_bot_token.clone();
-            let tg_chat = config.telegram_chat_id.clone();
-            let dry_run = config.dry_run;
-            
-            println!("🔄 RECOVERING OPEN POSITION: {} - Respawning exit watcher.", mint);
-            
-            tokio::spawn(async move {
-                let _permit = permit;
-                crate::exits::monitor_and_sell(
-                    mint,
-                    rpc_clone,
-                    http_clone,
-                    keypair_clone,
-                    state_clone,
-                    rpc_url_clone,
-                    tg_token,
-                    tg_chat,
-                    dry_run,
-                ).await;
-            });
-        } else {
-            eprintln!("⚠️  Could not recover position {} (Max positions reached).", mint);
-        }
-    }
+    // Generation 1 is fail-closed in this branch: retained execution and exit
+    // code remains compiled as evidence, but startup never recovers positions
+    // or spawns monitor_and_sell.
+    println!("Shadow-only startup: position recovery and capital execution are disabled.");
 
     // 4. Start listener loop with graceful shutdown.
     //
@@ -134,13 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   Branch B: an OS signal (SIGINT or SIGTERM)
     //
     // If the listener errors out, it is logged and the process exits cleanly.
-    // If a shutdown signal arrives, we log a loud warning about open positions
-    // (any running monitor_and_sell tasks are orphaned -- they hold no position
-    // permits after this point but may still be in a sell attempt), then exit.
-    //
-    // NOTE: For a zero-downtime deploy, drain open positions before stopping.
-    //   Check `journalctl -u alphanexus-daemon | grep 'POSITION CLOSED'`
-    //   to confirm all watchers have exited before issuing systemctl stop.
+    // No position monitors or capital execution tasks are started in this
+    // shadow-only branch.
     let open_at_shutdown = bot_state.open_position_count();
     tokio::select! {
         result = websocket::run_listener(
