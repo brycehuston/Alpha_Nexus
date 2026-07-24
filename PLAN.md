@@ -11,9 +11,9 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 # Current Verified State
 
 - Last verified: 2026-07-23.
-- Branch: `test/shadow-pipeline-replay-clean`, created from baseline commit `4703fc3`.
-- Commit state: HEAD remains `d041ef7`; the approved corrected production/replay entry path and shadow-position lifecycle are ready to commit. Canonical Generation 1 baseline approval is complete after this commit.
-- Worktree: modified only in `PLAN.md`, `README.md`, `rust_daemon/src/db.rs`, `rust_daemon/src/state.rs`, `rust_daemon/src/telegram.rs`, and `rust_daemon/src/websocket.rs`. The separate original dirty worktree remains untouched.
+- Branch: `fix/backtester-native-balance`, created from `main` at `c2e22b5`.
+- Commit state: HEAD is `c2e22b5`; the approved Generation 1 baseline and FRUX NAV documentation are integrated on `main`.
+- Worktree: modified only in `PLAN.md`, `data_pipeline/backtest_wallets.py`, and `data_pipeline/test_backtest_wallets.py`. The separate original dirty worktree remains untouched and is used only as a read-only parser and fixture reference.
 - Toolchain: Cargo 1.97.1 and rustc 1.97.1; Python 3.13.5. Cargo is installed locally but was not on this shell's `PATH`.
 - Build: `cargo check --locked` passes. Dormant execution and exit code produces expected unused-code warnings; Solana client 1.18.26 also has a future-incompatibility notice.
 - Tests: `cargo test --locked` passes with five deterministic tests: four startup-policy cases and one expanded production-path shadow replay.
@@ -54,15 +54,26 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 - [x] Independently review the fail-closed shadow startup and replay-test commit; rejected because the production/replay entry paths differ and accepted permits are dropped immediately.
 - [x] Correct the production/replay entry path, fail-closed lazy enrichment, and retained four-hour shadow-position lifecycle; validate cap fill, explicit release, and deterministic expiry through ordinary accepted events.
 - [x] Independently review the corrected production/replay entry path and shadow position lifecycle; passed with no blocking findings.
-- [~] Push the approved baseline branch and open a pull request.
+- [x] Push the approved baseline branch and open a pull request.
+- [x] Correct and validate wallet backtester UTF-8 output and fail-closed native-balance trade parsing.
+- [x] Independently review the wallet backtester parser correction and offline validation evidence.
+- [~] Await explicit approval for the next Alpha Nexus task.
 - [-] Generation 2 redesign or migration: explicitly deferred pending an independent design and shadow-testing decision.
 
 # Current Action
 
-Push the approved baseline branch and open a pull request.
+Await explicit approval for the next Alpha Nexus task.
 
 # Validation Evidence
 
+- `python -m unittest data_pipeline.test_backtest_wallets -v`: passed; 10 offline parser and stdout tests passed.
+- Supplied `test_tx.json`: parsed as a sell of `18,969,867.095602` tokens for `0.800328221` SOL.
+- Fail-closed parser matrix: passed for missing, null, non-list, malformed, unmatched, and duplicate account data; missing, null, non-numeric, boolean, and zero native balance changes; ambiguous transfers; direction disagreement; and fee-only balance loss.
+- UTF-8 configuration: passed with redirected `TextIOWrapper`, `StringIO`, and a replacement stream that rejects reconfiguration.
+- `python -m py_compile data_pipeline\\backtest_wallets.py`: passed.
+- `git diff --check`: passed.
+- Independent Claude review: **YES — approve as-is**.
+- Network requests and live backtest: not run.
 - `rustfmt --edition 2021 --check src/state.rs src/websocket.rs src/telegram.rs src/db.rs`: passed.
 - Independent review: passed; blocking findings: none.
 - `cargo check --locked`: passed; dormant execution/exit warnings and one future-incompatibility notice remain.
