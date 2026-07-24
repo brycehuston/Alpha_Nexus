@@ -64,6 +64,45 @@ Before finishing:
 - Compilation alone is not evidence that execution is safe.
 - Preserve a clear paper/dry-run mode.
 
+## Paid API and Quota Cost Control
+
+Paid API credits, RPC quota, model usage, compute credits, and rate limits are
+project capital. Optimize for the cheapest reliable path that preserves data
+quality and correctness.
+
+Rules:
+
+- Check local caches and existing artifacts before making any network request.
+- Reuse previously downloaded responses instead of purchasing the same data
+  again.
+- Inspect metadata, schemas, or a minimal sample before downloading full
+  results.
+- Request only the required columns, rows, wallets, time ranges, and pages.
+- Validate and deduplicate inputs locally before sending them to a paid API.
+- Save every paid response incrementally with source and request provenance.
+- Never execute, refresh, or rerun a paid Dune query without explicit user
+  approval.
+- Never override a provider credit ceiling, spending limit, or safety limit
+  without explicit user approval.
+- Stop and report before continuing after HTTP 402, repeated 429 responses,
+  unexpected cost, or unexpectedly large result estimates.
+- Multiple agents must analyze the same cached dataset. Do not allow separate
+  agents to independently repeat paid downloads or backtests.
+- Use cheap screening before expensive enrichment. Reserve Helius enhanced
+  transaction history and similar high-cost calls for candidates that survive
+  local screening.
+- Before a material paid operation, report:
+  - service
+  - data or action requested
+  - reason it is necessary
+  - cached or cheaper alternative
+  - expected requests, rows, or wallets
+  - known or possible credit impact
+  - whether explicit approval is required
+- Prefer zero-cost local analysis when it can answer the question reliably.
+- Cost optimization must not justify fabricated data, skipped validation, or
+  weakened safety checks.
+
 ## Git rules
 
 - Do not commit directly to `main` unless explicitly authorized; use a scoped branch.

@@ -11,9 +11,9 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 # Current Verified State
 
 - Last verified: 2026-07-23.
-- Branch: `fix/backtester-native-balance`, created from `main` at `c2e22b5`.
-- Commit state: HEAD is `c2e22b5`; the approved Generation 1 baseline and FRUX NAV documentation are integrated on `main`.
-- Worktree: modified only in `PLAN.md`, `data_pipeline/backtest_wallets.py`, and `data_pipeline/test_backtest_wallets.py`. The separate original dirty worktree remains untouched and is used only as a read-only parser and fixture reference.
+- Branch: `docs/api-budget-policy`, created from `main` at `2cba4c1`.
+- Commit state: HEAD is `2cba4c1`; the previous parser task is complete and merged.
+- Worktree: clean before this documentation task.
 - Toolchain: Cargo 1.97.1 and rustc 1.97.1; Python 3.13.5. Cargo is installed locally but was not on this shell's `PATH`.
 - Build: `cargo check --locked` passes. Dormant execution and exit code produces expected unused-code warnings; Solana client 1.18.26 also has a future-incompatibility notice.
 - Tests: `cargo test --locked` passes with five deterministic tests: four startup-policy cases and one expanded production-path shadow replay.
@@ -57,15 +57,32 @@ Preserve and make Generation 1 operable as a verified, dry-run shadow signal col
 - [x] Push the approved baseline branch and open a pull request.
 - [x] Correct and validate wallet backtester UTF-8 output and fail-closed native-balance trade parsing.
 - [x] Independently review the wallet backtester parser correction and offline validation evidence.
-- [~] Await explicit approval for the next Alpha Nexus task.
+- [x] Add and validate the paid API cost-control policy.
+- [~] Resume cached Dune candidate validation after this policy branch is merged.
 - [-] Generation 2 redesign or migration: explicitly deferred pending an independent design and shadow-testing decision.
 
 # Current Action
 
-Await explicit approval for the next Alpha Nexus task.
+After merging this documentation branch, validate the existing cached Dune
+results locally and determine the minimum additional paid requests required.
+
+# Budget Constraints
+
+- Reuse the five existing cached Dune JSON responses.
+- Do not redownload an existing result page.
+- Do not execute or refresh any Dune query without explicit approval.
+- Do not override Dune credit limits.
+- Make only minimal metadata or missing-page requests after validating the
+  trader-wallet column.
+- Do not call Helius until Dune candidates are validated, deduplicated, and
+  screened locally.
+- Checkpoint every paid response immediately.
+- Paid executions currently authorized: zero.
 
 # Validation Evidence
 
+- Paid API policy documentation: `git diff --check` passed; no paid API calls made.
+- Paid API policy documentation review: passed.
 - `python -m unittest data_pipeline.test_backtest_wallets -v`: passed; 10 offline parser and stdout tests passed.
 - Supplied `test_tx.json`: parsed as a sell of `18,969,867.095602` tokens for `0.800328221` SOL.
 - Fail-closed parser matrix: passed for missing, null, non-list, malformed, unmatched, and duplicate account data; missing, null, non-numeric, boolean, and zero native balance changes; ambiguous transfers; direction disagreement; and fee-only balance loss.
