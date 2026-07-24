@@ -58,6 +58,8 @@ REDIS_SEED = os.environ.get("REDIS_SEED", "false").lower() == "true"
 # ── Constants ──────────────────────────────────────────────────────────────────
 HELIUS_TX_URL   = f"https://api.helius.xyz/v0/addresses/{{address}}/transactions"
 WSOL_MINT       = "So11111111111111111111111111111111111111112"
+PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMP_AMM_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 TX_LIMIT        = 100          # max per page (Helius max)
 MAX_PAGES       = 10           # cap at 1000 txs per wallet to avoid rate limit burn
 MAX_WALLETS     = 10
@@ -381,17 +383,38 @@ def fetch_transactions(
     return all_txs, False
 
 
-def is_pump_fun(tx: dict) -> bool:
-    """Returns True if the transaction originated from pump.fun."""
-    source = tx.get("source", "")
-    # Also check instructions for pump.fun program ID
-    PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-    if source == "PUMP_FUN":
-        return True
-    for ix in tx.get("instructions", []):
-        if ix.get("programId") == PUMP_FUN_PROGRAM:
+def contains_program(instructions, program_id: str) -> bool:
+    """Search Helius top-level and inner instructions for a program ID."""
+    if not isinstance(instructions, list):
+        return False
+    for instruction in instructions:
+        if not isinstance(instruction, dict):
+            continue
+        if instruction.get("programId") == program_id:
+            return True
+        if contains_program(instruction.get("innerInstructions"), program_id):
             return True
     return False
+
+
+def is_pump_fun(tx: dict) -> bool:
+    """Returns True if the transaction originated from pump.fun."""
+    return (
+        tx.get("source") == "PUMP_FUN"
+        or any(
+            isinstance(instruction, dict)
+            and instruction.get("programId") == PUMP_FUN_PROGRAM
+            for instruction in tx.get("instructions", [])
+        )
+    )
+
+
+def is_pump_swap(tx: dict) -> bool:
+    """Returns True for direct or program-proven routed PumpSwap activity."""
+    return (
+        tx.get("source") == "PUMP_AMM"
+        or contains_program(tx.get("instructions"), PUMP_AMM_PROGRAM)
+    )
 
 
 def parse_trade(tx: dict, wallet: str) -> dict | None:
@@ -499,11 +522,11 @@ def parse_trade(tx: dict, wallet: str) -> dict | None:
 
 def score_wallet(address: str, txs: list) -> dict:
     """
-    Scores a complete wallet's pump.fun trading history.
+    Scores a complete wallet's pump.fun and PumpSwap trading history.
     Returns a metrics dict.
     """
-    pump_txs = [tx for tx in txs if is_pump_fun(tx)]
-    print(f"    Found {len(txs)} total swaps, {len(pump_txs)} pump.fun")
+    pump_txs = [tx for tx in txs if is_pump_fun(tx) or is_pump_swap(tx)]
+    print(f"    Found {len(txs)} total swaps, {len(pump_txs)} pump trades")
 
     trades: dict[str, dict] = {}  # mint → {buy_sol, sell_sol, complete}
 

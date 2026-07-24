@@ -11,10 +11,14 @@ os.environ.setdefault("HELIUS_API_KEY", "offline-test")
 
 import data_pipeline.backtest_wallets as backtester
 from data_pipeline.backtest_wallets import (
+    PUMP_AMM_PROGRAM,
     PilotFatalError,
     configure_stdout_utf8,
+    is_pump_fun,
+    is_pump_swap,
     parse_trade,
     run_pilot,
+    score_wallet,
 )
 
 
@@ -41,7 +45,73 @@ def trade_fixture(native_balance_change=800_328_221):
     }
 
 
+def pump_swap_fixture(native_balance_change=800_328_221, source="PUMP_AMM"):
+    tx = trade_fixture(native_balance_change)
+    tx["source"] = source
+    return tx
+
+
 class ParseTradeTests(unittest.TestCase):
+    def test_existing_pump_fun_parsing_is_unchanged(self):
+        tx = trade_fixture()
+        tx["source"] = "PUMP_FUN"
+
+        self.assertTrue(is_pump_fun(tx))
+        with redirect_stdout(io.StringIO()):
+            result = score_wallet(WALLET, [tx])
+
+        self.assertEqual(result["total_trades"], 1)
+        self.assertEqual(result["net_sol"], 0.8003)
+
+        tx["source"] = "JUPITER"
+        tx["instructions"] = [
+            {
+                "programId": "router",
+                "innerInstructions": [
+                    {"programId": backtester.PUMP_FUN_PROGRAM}
+                ],
+            }
+        ]
+        self.assertFalse(is_pump_fun(tx))
+
+    def test_direct_pump_amm_buy_parses_correctly(self):
+        tx = pump_swap_fixture(-500_000_000)
+        tx["tokenTransfers"][0]["fromUserAccount"] = "counterparty"
+        tx["tokenTransfers"][0]["toUserAccount"] = WALLET
+
+        self.assertTrue(is_pump_swap(tx))
+        trade = parse_trade(tx, WALLET)
+
+        self.assertEqual(trade["direction"], "buy")
+        self.assertEqual(trade["sol_amount"], 0.5)
+
+    def test_direct_pump_amm_sell_parses_correctly(self):
+        tx = pump_swap_fixture()
+
+        self.assertTrue(is_pump_swap(tx))
+        trade = parse_trade(tx, WALLET)
+
+        self.assertEqual(trade["direction"], "sell")
+        self.assertEqual(trade["sol_amount"], 0.800328221)
+
+    def test_routed_source_requires_pump_swap_program_id(self):
+        tx = pump_swap_fixture(152_351_294, source="JUPITER")
+        tx["tokenTransfers"][0]["tokenAmount"] = 2_471_609.859401
+        tx["instructions"] = [
+            {
+                "programId": "router",
+                "innerInstructions": [{"programId": PUMP_AMM_PROGRAM}],
+            }
+        ]
+
+        self.assertTrue(is_pump_swap(tx))
+        with redirect_stdout(io.StringIO()):
+            result = score_wallet(WALLET, [tx])
+        self.assertEqual(result["total_trades"], 1)
+
+        del tx["instructions"]
+        self.assertFalse(is_pump_swap(tx))
+
     def test_sell_uses_wallet_native_balance_change(self):
         trade = parse_trade(trade_fixture(), WALLET)
 
@@ -106,7 +176,7 @@ class ParseTradeTests(unittest.TestCase):
                 self.assertIsNone(parse_trade(tx, WALLET))
 
     def test_token_and_sol_direction_disagreement_fails_closed(self):
-        tx = trade_fixture(-800_328_221)
+        tx = pump_swap_fixture(-800_328_221)
 
         self.assertIsNone(parse_trade(tx, WALLET))
 
@@ -119,9 +189,15 @@ class ParseTradeTests(unittest.TestCase):
 
         self.assertIsNone(parse_trade(tx, WALLET))
 
-    def test_ambiguous_token_direction_fails_closed(self):
-        tx = trade_fixture()
-        tx["tokenTransfers"].append(copy.deepcopy(tx["tokenTransfers"][0]))
+    def test_ambiguous_pump_swap_multi_leg_fails_closed(self):
+        tx = pump_swap_fixture(-19_276_022)
+        tx["fee"] = 17_201_942
+        tx["feePayer"] = WALLET
+        tx["tokenTransfers"][0]["tokenAmount"] = 0.000084
+        received = copy.deepcopy(tx["tokenTransfers"][0])
+        received["fromUserAccount"] = "counterparty"
+        received["toUserAccount"] = WALLET
+        tx["tokenTransfers"].append(received)
 
         self.assertIsNone(parse_trade(tx, WALLET))
 
