@@ -1,11 +1,21 @@
 import copy
 import io
+import json
 import os
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 
 os.environ.setdefault("HELIUS_API_KEY", "offline-test")
 
-from data_pipeline.backtest_wallets import configure_stdout_utf8, parse_trade
+import data_pipeline.backtest_wallets as backtester
+from data_pipeline.backtest_wallets import (
+    PilotFatalError,
+    configure_stdout_utf8,
+    parse_trade,
+    run_pilot,
+)
 
 
 WALLET = "wallet"
@@ -146,6 +156,196 @@ class StdoutConfigurationTests(unittest.TestCase):
                 raise TypeError("unsupported")
 
         configure_stdout_utf8(ReplacementStream())
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None, headers=None):
+        self.status_code = status_code
+        self.payload = [] if payload is None else payload
+        self.headers = headers or {}
+
+    def json(self):
+        return copy.deepcopy(self.payload)
+
+
+class FakeHttp:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, url, *, params, timeout):
+        self.calls.append((url, dict(params), timeout))
+        if not self.responses:
+            raise AssertionError("unexpected HTTP request")
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def full_page(prefix):
+    return [{"signature": f"{prefix}-{index}"} for index in range(100)]
+
+
+class PilotBehaviorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.candidates = self.root / "candidates.txt"
+        self.output = self.root / "output"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def write_candidates(self, wallets):
+        self.candidates.write_text("\n".join(wallets) + "\n", encoding="utf-8")
+
+    def run_pilot_case(self, client, sleeper=lambda _seconds: None):
+        return run_pilot(
+            self.candidates,
+            self.output,
+            request_get=client,
+            sleeper=sleeper,
+        )
+
+    def test_more_than_ten_unique_wallets_rejected_before_request(self):
+        self.write_candidates([f"wallet-{index}" for index in range(11)])
+        client = FakeHttp([])
+
+        with self.assertRaisesRegex(PilotFatalError, "exceeds 10"):
+            self.run_pilot_case(client)
+
+        self.assertEqual(client.calls, [])
+
+    def test_ten_full_pages_are_incomplete_and_cannot_qualify(self):
+        wallet = "wallet-one"
+        self.write_candidates([wallet])
+        client = FakeHttp(
+            [FakeResponse(payload=full_page(f"page-{index}")) for index in range(10)]
+        )
+
+        results, manifest = self.run_pilot_case(client)
+
+        self.assertEqual(len(client.calls), 10)
+        self.assertEqual(results, [])
+        self.assertEqual(manifest["wallets"][wallet]["status"], "INCOMPLETE")
+        self.assertEqual(manifest["wallets"][wallet]["pages_cached"], 10)
+
+    def test_120_attempt_and_12000_credit_ceiling(self):
+        wallet = "wallet-one"
+        self.write_candidates([wallet])
+        self.output.mkdir()
+        (self.output / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "total_attempts": 120,
+                    "estimated_credits": 12_000,
+                    "wallets": {
+                        wallet: {
+                            "status": "NOT_STARTED",
+                            "pages_cached": 0,
+                            "last_cursor": None,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        client = FakeHttp([])
+
+        with self.assertRaisesRegex(PilotFatalError, "budget exhausted"):
+            self.run_pilot_case(client)
+
+        manifest = json.loads(
+            (self.output / "manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(client.calls, [])
+        self.assertEqual(manifest["total_attempts"], 120)
+        self.assertEqual(manifest["estimated_credits"], 12_000)
+
+    def test_successful_page_is_cached_and_reused_after_restart(self):
+        wallet = "wallet-one"
+        page = [{"signature": "only-page"}]
+        self.write_candidates([wallet])
+        first_client = FakeHttp([FakeResponse(payload=page)])
+
+        self.run_pilot_case(first_client)
+
+        cache_path = self.output / "cache" / wallet / "page_1.json"
+        self.assertEqual(
+            json.loads(cache_path.read_text(encoding="utf-8")),
+            page,
+        )
+        second_client = FakeHttp([])
+        _, manifest = self.run_pilot_case(second_client)
+        self.assertEqual(second_client.calls, [])
+        self.assertEqual(manifest["wallets"][wallet]["status"], "COMPLETE")
+
+    def test_401_402_and_403_abort_entire_run(self):
+        for status in (401, 402, 403):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                candidates = root / "candidates.txt"
+                candidates.write_text("wallet-one\nwallet-two\n", encoding="utf-8")
+                client = FakeHttp([FakeResponse(status_code=status)])
+
+                with self.assertRaisesRegex(PilotFatalError, f"HTTP {status}"):
+                    run_pilot(
+                        candidates,
+                        root / "output",
+                        request_get=client,
+                        sleeper=lambda _seconds: None,
+                    )
+
+                self.assertEqual(len(client.calls), 1)
+
+    def test_second_429_is_fatal(self):
+        self.write_candidates(["wallet-one", "wallet-two"])
+        client = FakeHttp(
+            [
+                FakeResponse(status_code=429),
+                FakeResponse(status_code=429),
+            ]
+        )
+
+        with self.assertRaisesRegex(PilotFatalError, "Second HTTP 429"):
+            self.run_pilot_case(client)
+
+        self.assertEqual(len(client.calls), 2)
+
+    def test_repeated_5xx_is_fatal(self):
+        self.write_candidates(["wallet-one", "wallet-two"])
+        client = FakeHttp(
+            [
+                FakeResponse(status_code=500),
+                FakeResponse(status_code=503),
+            ]
+        )
+
+        with self.assertRaisesRegex(PilotFatalError, "Repeated HTTP 5xx"):
+            self.run_pilot_case(client)
+
+        self.assertEqual(len(client.calls), 2)
+
+    def test_api_key_is_absent_from_output_and_files(self):
+        self.write_candidates(["wallet-one"])
+        secret = backtester.HELIUS_API_KEY
+        client = FakeHttp([RuntimeError(f"url contained api-key={secret}")])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(PilotFatalError) as caught:
+                self.run_pilot_case(client)
+
+        visible = stdout.getvalue() + stderr.getvalue() + str(caught.exception)
+        file_text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in self.root.rglob("*")
+            if path.is_file()
+        )
+        self.assertNotIn(secret, visible)
+        self.assertNotIn(secret, file_text)
 
 
 if __name__ == "__main__":
